@@ -2,6 +2,7 @@
 
 mod config;
 mod json;
+mod picker;
 mod probe;
 mod profile;
 mod split;
@@ -38,29 +39,42 @@ fn main() {
     let command = args.first().map(String::as_str).unwrap_or("tui");
     let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
 
-    let result = match command {
-        "tui" | "menu" | "" => tui::run(&cfg),
+    let result = dispatch(&cfg, command, &rest);
+
+    if let Err(message) = result {
+        eprintln!("{RED}{message}{RESET}");
+        std::process::exit(1);
+    }
+}
+
+/// Разбор команды. Вынесен из main, чтобы палитра могла запускать выбранное
+/// тем же путём, каким его набирают руками.
+pub fn dispatch(cfg: &Config, command: &str, rest: &[&str]) -> Result<(), String> {
+    let cfg = cfg;
+    let rest = rest.to_vec();
+    match command {
+        "tui" | "menu" | "" => tui::run(cfg),
         "status" => {
-            print_status(&cfg);
+            print_status(cfg);
             Ok(())
         }
-        "on" => Zapret::new(&cfg).start().map(|_| print_status(&cfg)),
-        "off" => Zapret::new(&cfg).stop().map(|_| print_status(&cfg)),
-        "restart" => Zapret::new(&cfg).restart().map(|_| print_status(&cfg)),
-        "toggle" => toggle_zapret(&cfg),
-        "strat" | "strategy" => strategy(&cfg, rest.first().copied()),
-        "vpn" => vpn_command(&cfg, &rest),
-        "tg" | "telegram" => telegram_command(&cfg, &rest),
+        "on" => Zapret::new(cfg).start().map(|_| print_status(cfg)),
+        "off" => Zapret::new(cfg).stop().map(|_| print_status(cfg)),
+        "restart" => Zapret::new(cfg).restart().map(|_| print_status(cfg)),
+        "toggle" => toggle_zapret(cfg),
+        "strat" | "strategy" => strategy(cfg, rest.first().copied()),
+        "vpn" => vpn_command(cfg, &rest),
+        "tg" | "telegram" => telegram_command(cfg, &rest),
         "test" => {
-            run_test_public(&cfg);
+            run_test_public(cfg);
             Ok(())
         }
-        "tune" => tune_command(&cfg, &rest),
-        "profile" | "prof" => profile_command(&cfg, &rest),
-        "share" => share_command(&cfg, &rest),
-        "split" => split_command(&cfg, &rest),
-        "watch" => watch_command(&cfg, &rest),
-        "qr" => show_qr_maybe_png(&cfg, &rest),
+        "tune" => tune_command(cfg, &rest),
+        "profile" | "prof" => profile_command(cfg, &rest),
+        "share" => share_command(cfg, &rest),
+        "split" => split_command(cfg, &rest),
+        "watch" => watch_command(cfg, &rest),
+        "qr" => show_qr_maybe_png(cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
         "version" | "-V" | "--version" => {
             println!("netpult {}", env!("CARGO_PKG_VERSION"));
@@ -70,12 +84,83 @@ fn main() {
             print_help();
             Ok(())
         }
-        other => Err(format!("неизвестная команда: {other}")),
-    };
+        other => unknown_command(cfg, other, &rest),
+    }
+}
 
-    if let Err(message) = result {
-        eprintln!("{RED}{message}{RESET}");
-        std::process::exit(1);
+/// Команды пульта для палитры: что набрать и что оно делает.
+pub fn commands() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("status", "состояние всего и внешний адрес"),
+        ("test", "проверить YouTube, Discord, Telegram и скорость"),
+        ("on", "включить zapret"),
+        ("off", "выключить zapret"),
+        ("restart", "перезапустить zapret"),
+        ("strat", "список стратегий обхода"),
+        ("tune", "подобрать рабочую стратегию перебором"),
+        ("vpn on", "поднять туннель"),
+        ("vpn off", "снять туннель"),
+        ("vpn nodes", "ноды с задержками"),
+        ("vpn use", "выбрать ноду стрелками"),
+        ("vpn auto", "выбирать самую быструю самому"),
+        ("vpn update", "перечитать подписку"),
+        ("vpn sub", "загрузить подписку по ссылке"),
+        ("vpn core install", "поставить ядро sing-box"),
+        ("vpn log", "журнал ядра"),
+        ("tg on", "включить прокси Telegram"),
+        ("tg off", "выключить прокси Telegram"),
+        ("tg qr", "QR прокси для телефона"),
+        ("tg link", "ссылки на прокси"),
+        ("split on", "сплит: нужные домены через ноду"),
+        ("split off", "выключить сплит"),
+        ("split list", "какие домены идут через ноду"),
+        ("split update", "обновить автосписок геоблока"),
+        ("split log", "что шло через ноду"),
+        ("share on", "раздать интернет телефону"),
+        ("share off", "выключить раздачу"),
+        ("share status", "адрес, порт, пароль, устройства"),
+        ("profile", "профиль этой сети"),
+        ("profile save", "запомнить состояние для этой сети"),
+        ("profile apply", "привести всё к профилю сети"),
+        ("watch --once", "один проход проверки"),
+        ("watch install", "сторож в автозапуск"),
+        ("watch log", "что чинилось"),
+        ("help", "справка"),
+    ]
+}
+
+/// Незнакомая команда — не приговор: почти всегда это опечатка или половина
+/// нужного слова. Показываем палитру, отфильтрованную набранным, и запускаем
+/// выбранное. Если ввод не с терминала — просто советуем похожее.
+fn unknown_command(cfg: &Config, typed: &str, rest: &[&str]) -> Result<(), String> {
+    let typed_full = if rest.is_empty() {
+        typed.to_string()
+    } else {
+        format!("{typed} {}", rest.join(" "))
+    };
+    let all = commands();
+    let items: Vec<picker::Item> = all
+        .iter()
+        .map(|(name, about)| picker::Item::new(*name).hint(*about))
+        .collect();
+
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let close = picker::closest(&all, &typed_full, 3);
+        if close.is_empty() {
+            return Err(format!("неизвестная команда: {typed_full}"));
+        }
+        return Err(format!(
+            "неизвестная команда: {typed_full}. Похоже на: {}",
+            close.join(", ")
+        ));
+    }
+
+    match picker::choose_prefilled("КОМАНДЫ", &items, &typed_full)? {
+        Some(index) => {
+            let parts: Vec<&str> = all[index].0.split(' ').collect();
+            dispatch(cfg, parts[0], &parts[1..])
+        }
+        None => Ok(()),
     }
 }
 
@@ -140,9 +225,10 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
         Some("use") | Some("select") => {
             let want = rest[1..].join(" ");
             if want.trim().is_empty() {
-                return Err("нужен номер или имя: net vpn use <номер|имя>".into());
+                vpn_pick(cfg)
+            } else {
+                vpn_use(&want)
             }
-            vpn_use(&want)
         }
         Some("auto") => {
             singbox::select(singbox::AUTO)?;
@@ -201,6 +287,35 @@ fn vpn_nodes(cfg: &Config) -> Result<(), String> {
         println!("\nсейчас: {now}");
     }
     Ok(())
+}
+
+/// Выбор ноды стрелками с поиском по мере набора. Задержки подставляются, если
+/// туннель поднят: выбирать вслепую из двух десятков стран бессмысленно.
+fn vpn_pick(cfg: &Config) -> Result<(), String> {
+    let names: Vec<String> = sub::load_nodes()?.into_iter().map(|n| n.name).collect();
+    let up = singbox::Core::new(cfg).state() == singbox::State::Up;
+    let current = if up { singbox::current_node() } else { None };
+    if up {
+        println!("Меряю задержки...");
+    }
+    let items: Vec<picker::Item> = names
+        .iter()
+        .map(|name| {
+            let mut item = picker::Item::new(name.clone())
+                .current(current.as_deref() == Some(name.as_str()));
+            if up {
+                item = item.hint(match singbox::delay(name, 3000) {
+                    Some(ms) => format!("{ms} мс"),
+                    None => "не отвечает".to_string(),
+                });
+            }
+            item
+        })
+        .collect();
+    match picker::choose("НОДЫ", &items)? {
+        Some(index) => vpn_use(&names[index]),
+        None => Ok(()),
+    }
 }
 
 /// Выбор ноды номером из списка или частью имени — набирать флаги стран руками

@@ -21,6 +21,15 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         let Some(key) = read_key()? else { continue };
 
         message = match key {
+            // Палитра команд: то же, что набрать команду в строке, только с
+            // поиском и стрелками — команд стало больше, чем цифр в меню.
+            KeyCode::Char('/') => {
+                match palette(cfg) {
+                    Ok(Some(outcome)) => Some(outcome),
+                    Ok(None) => None,
+                    Err(e) => Some((false, e)),
+                }
+            }
             KeyCode::Char('1') => Some(toggle_zapret(cfg)),
             KeyCode::Char('2') => {
                 pick_strategy(cfg)?;
@@ -123,7 +132,7 @@ fn draw(cfg: &Config, message: Option<&(bool, String)>) {
     println!(
         "  {DIM}[7]{RESET} автоподбор        {DIM}[8]{RESET} раздача     {DIM}[9]{RESET} профиль сети"
     );
-    println!("  {DIM}[q]{RESET} выход");
+    println!("  {DIM}[/]{RESET} команды поиском   {DIM}[q]{RESET} выход");
 
     if let Some((ok, text)) = message {
         let color = if *ok { GREEN } else { YELLOW };
@@ -171,6 +180,28 @@ fn toggle_share(cfg: &Config) -> (bool, String) {
         ),
         Err(e) => (false, e),
     }
+}
+
+/// Палитра: выбрал команду — она тут же выполняется, вывод остаётся на экране
+/// до нажатия клавиши, иначе результат мелькнул бы и пропал.
+fn palette(cfg: &Config) -> Result<Option<(bool, String)>, String> {
+    let all = crate::commands();
+    let items: Vec<crate::picker::Item> = all
+        .iter()
+        .map(|(name, about)| crate::picker::Item::new(*name).hint(*about))
+        .collect();
+    let Some(index) = crate::picker::choose("КОМАНДЫ", &items)? else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = all[index].0.split(' ').collect();
+    clear();
+    println!("{DIM}  net {}{RESET}\n", all[index].0);
+    let outcome = match crate::dispatch(cfg, parts[0], &parts[1..]) {
+        Ok(()) => (true, format!("выполнено: {}", all[index].0)),
+        Err(e) => (false, e),
+    };
+    pause();
+    Ok(Some(outcome))
 }
 
 fn pick_strategy(cfg: &Config) -> Result<(), String> {
