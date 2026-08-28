@@ -144,6 +144,16 @@ impl<'a> Core<'a> {
             .ok_or_else(|| "ядро sing-box не найдено — net vpn core install".to_string())
     }
 
+    /// Состояние ядра, когда настроек под рукой нет: живость определяется по
+    /// API, а он не зависит ни от чего в конфиге.
+    pub fn state_now() -> State {
+        if api_get("/version").is_some() {
+            State::Up
+        } else {
+            State::Down
+        }
+    }
+
     pub fn state(&self) -> State {
         // Живость проверяется по API, а не по процессу: ядро может остаться в
         // памяти, но не отвечать, и тогда пульт врал бы, что всё хорошо.

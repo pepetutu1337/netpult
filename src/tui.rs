@@ -1,126 +1,200 @@
-//! Интерактивный экран: состояние сверху, строка ввода снизу.
+//! Экран пульта: состояние сверху, ноды посередине, строка ввода снизу.
 //!
-//! Строка ввода есть всегда: набираешь часть команды — под ней появляются
-//! похожие, стрелки выбирают, Enter выполняет. Пока строка пустая, цифры
-//! работают как быстрые клавиши, чтобы привычные действия остались в одно
-//! нажатие.
+//! Устроен как одно окно, из которого никуда не уходишь. Команды набираются
+//! в строке — под ней тут же появляются похожие. Вывод команды печатается на
+//! том же экране, поэтому «нажмите клавишу, чтобы вернуться» не нужно: экран
+//! и есть то место, куда возвращаться.
+//!
+//! Долгие дела (замер задержек, подбор стратегии) идут в отдельном потоке и
+//! досылают строки по мере готовности — экран при этом живой, а не замерший.
 
 use crate::config::Config;
-use crate::probe;
-use crate::profile;
-use crate::telegram::Telegram;
-use crate::tune;
-use crate::vpn::Vpn;
-use crate::zapret::{self, Zapret};
-use crate::{qr, status_lines, BOLD, DIM, GREEN, RED, RESET, YELLOW};
+use crate::singbox;
+use crate::sub;
+use crate::{status_lines, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
-use std::io::Write;
-use std::time::Duration;
+use std::io::{BufRead, Write};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+/// Сколько строк вывода команды показывать.
+const OUTPUT_ROWS: usize = 8;
+
+/// Сколько нод помещается в список.
+const NODE_ROWS: usize = 7;
+
+/// Весточка из рабочего потока.
+enum Work {
+    /// Строка вывода запущенной команды.
+    Line(String),
+    /// Задержка ноды: номер и результат замера.
+    Delay(usize, Option<u32>),
+    /// Дело кончилось: чем именно.
+    Done(bool, String),
+}
+
+struct Node {
+    name: String,
+    /// `None` — ещё не мерили, `Some(None)` — не ответила.
+    delay: Option<Option<u32>>,
+}
+
+struct Screen {
+    status: Vec<(bool, String)>,
+    status_taken: Instant,
+    nodes: Vec<Node>,
+    node_at: usize,
+    current: Option<String>,
+    input: String,
+    suggestion_at: usize,
+    output: Vec<String>,
+    message: Option<(bool, String)>,
+    busy: Option<String>,
+}
 
 pub fn run(cfg: &Config) -> Result<(), String> {
-    let mut message: Option<(bool, String)> = None;
-    let mut input = String::new();
-    let mut cursor = 0usize;
-    // Состояние опрашивает систему (службы, процессы, интерфейсы) — делать это
-    // на каждую нажатую букву значит превратить набор в рывки. Держим снимок и
-    // обновляем его по времени и после действий.
-    let mut status = status_lines(cfg);
-    let mut status_taken = std::time::Instant::now();
-
-    let all = crate::commands();
-    let items: Vec<crate::picker::Item> = all
+    let mut screen = Screen {
+        status: status_lines(cfg),
+        status_taken: Instant::now(),
+        nodes: load_nodes(),
+        node_at: 0,
+        current: None,
+        input: String::new(),
+        suggestion_at: 0,
+        output: Vec::new(),
+        message: None,
+        busy: None,
+    };
+    let commands = crate::commands();
+    let items: Vec<crate::picker::Item> = commands
         .iter()
         .map(|(name, about)| crate::picker::Item::new(*name).hint(*about))
         .collect();
+    let (sender, receiver): (Sender<Work>, Receiver<Work>) = mpsc::channel();
 
     terminal::enable_raw_mode().map_err(|e| e.to_string())?;
     let _ = crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste);
     print!("\x1b[2J");
 
     let result = loop {
-        if status_taken.elapsed() > Duration::from_secs(5) {
-            status = status_lines(cfg);
-            status_taken = std::time::Instant::now();
+        // Сначала забираем всё, что успели прислать рабочие потоки.
+        while let Ok(work) = receiver.try_recv() {
+            match work {
+                Work::Line(line) => screen.output.push(line),
+                Work::Delay(index, ms) => {
+                    if let Some(node) = screen.nodes.get_mut(index) {
+                        node.delay = Some(ms);
+                    }
+                }
+                Work::Done(ok, text) => {
+                    screen.busy = None;
+                    screen.message = Some((ok, text));
+                    screen.status = status_lines(cfg);
+                    screen.status_taken = Instant::now();
+                    screen.nodes = merge_nodes(screen.nodes);
+                    screen.current = singbox::current_node();
+                }
+            }
+        }
+        if screen.status_taken.elapsed() > Duration::from_secs(10) && screen.busy.is_none() {
+            screen.status = status_lines(cfg);
+            screen.status_taken = Instant::now();
         }
 
-        let matches = suggest(&items, &input);
-        if cursor >= matches.len() {
-            cursor = 0;
+        let suggestions = suggest(&items, &screen.input);
+        if screen.suggestion_at >= suggestions.len() {
+            screen.suggestion_at = 0;
         }
-        draw(&status, message.as_ref(), &input, &matches, cursor);
+        draw(&screen, &suggestions);
 
+        // Ждём нажатия недолго: пока его нет, забираем вести от потоков и
+        // перерисовываем — так виден ход замера.
+        if !event::poll(Duration::from_millis(120)).map_err(|e| e.to_string())? {
+            continue;
+        }
         let event = match event::read() {
             Ok(e) => e,
             Err(e) => break Err(e.to_string()),
         };
-        // Вставка ссылки приходит одним событием, а не потоком клавиш: без
-        // этой ветки вставленное просто пропадало.
         if let Event::Paste(text) = &event {
-            input.push_str(text.trim());
-            cursor = 0;
+            screen.input.push_str(text.trim());
+            screen.suggestion_at = 0;
             continue;
         }
         let Event::Key(key) = event else { continue };
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            break Ok(());
+        }
 
-        if input.is_empty() {
+        if screen.input.is_empty() {
+            // Пустая строка — экран слушается стрелок и коротких клавиш.
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    let outcome = paused(|| hotkey(cfg, c));
-                    match outcome {
-                        Ok(value) => message = value,
-                        Err(e) => message = Some((false, e)),
-                    }
-                    status = status_lines(cfg);
-                    status_taken = std::time::Instant::now();
+                KeyCode::Up => {
+                    move_node(&mut screen, -1);
                     continue;
                 }
-                KeyCode::Char('/') => continue,
+                KeyCode::Down => {
+                    move_node(&mut screen, 1);
+                    continue;
+                }
+                KeyCode::Enter => {
+                    choose_node(&mut screen);
+                    continue;
+                }
+                KeyCode::Char('p') | KeyCode::Char('з') => {
+                    start_ping(&mut screen, sender.clone());
+                    continue;
+                }
+                KeyCode::Char('r') | KeyCode::Char('к') => {
+                    screen.status = status_lines(cfg);
+                    screen.status_taken = Instant::now();
+                    screen.nodes = load_nodes();
+                    screen.current = singbox::current_node();
+                    continue;
+                }
                 _ => {}
             }
         }
 
         match key.code {
-            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => break Ok(()),
             KeyCode::Esc => {
-                input.clear();
-                cursor = 0;
+                screen.input.clear();
+                screen.suggestion_at = 0;
             }
             KeyCode::Backspace => {
-                input.pop();
-                cursor = 0;
+                screen.input.pop();
+                screen.suggestion_at = 0;
             }
             KeyCode::Down | KeyCode::Tab => {
-                if !matches.is_empty() {
-                    cursor = (cursor + 1) % matches.len();
+                if !suggestions.is_empty() {
+                    screen.suggestion_at = (screen.suggestion_at + 1) % suggestions.len();
                 }
             }
             KeyCode::Up | KeyCode::BackTab => {
-                if !matches.is_empty() {
-                    cursor = (cursor + matches.len() - 1) % matches.len();
+                if !suggestions.is_empty() {
+                    screen.suggestion_at =
+                        (screen.suggestion_at + suggestions.len() - 1) % suggestions.len();
                 }
             }
             KeyCode::Enter => {
-                let line = match matches.get(cursor) {
-                    Some(suggestion) => suggestion.line.clone(),
-                    None => input.trim().to_string(),
+                let line = match suggestions.get(screen.suggestion_at) {
+                    Some(found) => found.line.clone(),
+                    None => screen.input.trim().to_string(),
                 };
-                input.clear();
-                cursor = 0;
-                if line.is_empty() {
-                    continue;
+                screen.input.clear();
+                screen.suggestion_at = 0;
+                if !line.is_empty() {
+                    start_command(&mut screen, sender.clone(), &line);
                 }
-                message = Some(paused(|| Ok(run_line(cfg, &line)))?);
-                status = status_lines(cfg);
-                status_taken = std::time::Instant::now();
             }
             KeyCode::Char(c) => {
-                input.push(c);
-                cursor = 0;
+                screen.input.push(c);
+                screen.suggestion_at = 0;
             }
             _ => {}
         }
@@ -132,13 +206,163 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     result
 }
 
+fn load_nodes() -> Vec<Node> {
+    sub::load_nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| Node {
+            name: n.name,
+            delay: None,
+        })
+        .collect()
+}
+
+/// Перечитать список нод, сохранив уже измеренное: после команды `vpn update`
+/// список может смениться, а мерить всё заново из-за этого не хочется.
+fn merge_nodes(previous: Vec<Node>) -> Vec<Node> {
+    let fresh = load_nodes();
+    fresh
+        .into_iter()
+        .map(|mut node| {
+            if let Some(old) = previous.iter().find(|p| p.name == node.name) {
+                node.delay = old.delay;
+            }
+            node
+        })
+        .collect()
+}
+
+fn move_node(screen: &mut Screen, step: isize) {
+    if screen.nodes.is_empty() {
+        return;
+    }
+    let count = screen.nodes.len() as isize;
+    screen.node_at = ((screen.node_at as isize + step + count) % count) as usize;
+}
+
+fn choose_node(screen: &mut Screen) {
+    let Some(node) = screen.nodes.get(screen.node_at) else {
+        return;
+    };
+    screen.message = Some(match singbox::select(&node.name) {
+        Ok(()) => {
+            screen.current = Some(node.name.clone());
+            (true, format!("нода: {}", node.name))
+        }
+        Err(e) => (false, e),
+    });
+}
+
+/// Замер задержек всех нод. Идёт в отдельном потоке и досылает результаты по
+/// одному: список заполняется на глазах, а не появляется через минуту.
+fn start_ping(screen: &mut Screen, sender: Sender<Work>) {
+    if screen.busy.is_some() {
+        return;
+    }
+    if singbox::Core::state_now() != singbox::State::Up {
+        screen.message = Some((false, "туннель не поднят — задержки мерить нечем".into()));
+        return;
+    }
+    let names: Vec<String> = screen.nodes.iter().map(|n| n.name.clone()).collect();
+    if names.is_empty() {
+        screen.message = Some((false, "подписка ещё не загружена".into()));
+        return;
+    }
+    for node in screen.nodes.iter_mut() {
+        node.delay = None;
+    }
+    screen.busy = Some("меряю задержки".into());
+    screen.message = None;
+    std::thread::spawn(move || {
+        let total = names.len();
+        for (index, name) in names.iter().enumerate() {
+            let ms = singbox::delay(name, 3000);
+            let _ = sender.send(Work::Delay(index, ms));
+            let _ = sender.send(Work::Line(format!("замерено {}/{total}", index + 1)));
+        }
+        let _ = sender.send(Work::Done(true, format!("задержки: {total} нод")));
+    });
+}
+
+/// Запустить команду и показывать её вывод по мере появления.
+///
+/// Команда выполняется отдельным процессом того же пульта: так её вывод
+/// перехватывается построчно, экран остаётся живым, а печать команд не нужно
+/// переписывать ради интерактивности.
+fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
+    if screen.busy.is_some() {
+        screen.message = Some((false, "подожди, предыдущее ещё идёт".into()));
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        screen.message = Some((false, "не найти самого себя на диске".into()));
+        return;
+    };
+    let args: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    screen.output.clear();
+    screen.busy = Some(line.to_string());
+    screen.message = None;
+    let shown = line.to_string();
+    std::thread::spawn(move || {
+        let child = std::process::Command::new(exe)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = sender.send(Work::Done(false, format!("не запустилось: {e}")));
+                return;
+            }
+        };
+        if let Some(out) = child.stdout.take() {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                let _ = sender.send(Work::Line(line));
+            }
+        }
+        let mut trouble = String::new();
+        if let Some(err) = child.stderr.take() {
+            for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+                trouble.push_str(line.trim());
+                let _ = sender.send(Work::Line(line));
+            }
+        }
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        let _ = sender.send(Work::Done(
+            ok,
+            if ok {
+                format!("готово: {shown}")
+            } else if trouble.is_empty() {
+                format!("не вышло: {shown}")
+            } else {
+                strip_colors(&trouble)
+            },
+        ));
+    });
+}
+
+fn strip_colors(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for skip in chars.by_ref() {
+                if skip.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Подсказка: что показать и что выполнить.
 pub struct Suggestion {
-    /// Команда целиком, как её выполнять.
     pub line: String,
-    /// Что показать слева.
     pub label: String,
-    /// Пояснение справа.
     pub about: String,
 }
 
@@ -170,8 +394,6 @@ fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
         })
         .collect();
 
-    // Набранное с аргументами ставим первым: раз человек дописал аргумент,
-    // именно это он и хочет запустить, а не голую команду из списка.
     if with_arguments(typed) {
         found.insert(
             0,
@@ -185,13 +407,11 @@ fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
     found
 }
 
-/// Ссылка в набранном — где бы она ни стояла.
 fn find_url(text: &str) -> Option<String> {
     let at = text.find("https://").or_else(|| text.find("http://"))?;
     Some(text[at..].split_whitespace().next()?.to_string())
 }
 
-/// Первое слово — известная команда, а дальше что-то ещё.
 fn with_arguments(typed: &str) -> bool {
     let mut words = typed.split_whitespace();
     let Some(first) = words.next() else {
@@ -205,176 +425,108 @@ fn with_arguments(typed: &str) -> bool {
         .any(|(name, _)| name.split_whitespace().next() == Some(first))
 }
 
-/// Выйти из сырого режима на время действия: команды печатают обычным
-/// образом, а в сыром режиме перевод строки не возвращает каретку.
-fn paused<T>(action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    terminal::disable_raw_mode().ok();
-    let result = action();
-    terminal::enable_raw_mode().ok();
-    print!("\x1b[2J");
-    result
-}
-
-/// Выполнить набранную строку так же, как если бы её набрали в терминале.
-fn run_line(cfg: &Config, line: &str) -> (bool, String) {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    clear();
-    println!("{DIM}  net {line}{RESET}\n");
-    let outcome = match crate::dispatch_with(cfg, parts[0], &parts[1..], false) {
-        Ok(()) => (true, format!("выполнено: {line}")),
-        Err(e) => (false, e),
-    };
-    pause();
-    outcome
-}
-
-/// Быстрые клавиши старого меню.
-fn hotkey(cfg: &Config, key: char) -> Result<Option<(bool, String)>, String> {
-    Ok(match key {
-        '1' => Some(toggle_zapret(cfg)),
-        '2' => {
-            pick_strategy(cfg)?;
-            None
-        }
-        '3' => {
-            println!();
-            crate::run_test_public(cfg);
-            pause();
-            None
-        }
-        '4' => Some(match Vpn::new(cfg).state() {
-            crate::vpn::State::Off => act(Vpn::new(cfg).open(), "Окно Happ открыто"),
-            _ => act(Vpn::new(cfg).close(), "Happ закрыт"),
-        }),
-        '5' => Some(toggle_telegram(cfg)),
-        '6' => {
-            show_qr(cfg);
-            None
-        }
-        '7' => {
-            clear();
-            println!("  Подбираю стратегию. Интернет будет прыгать.\n");
-            let outcome = match tune::run(cfg, &tune::Options { full: false, verbose: true }) {
-                Ok(best) => (true, format!("выбрана {}", best.strategy)),
-                Err(e) => (false, e),
-            };
-            pause();
-            Some(outcome)
-        }
-        '8' => Some(toggle_share(cfg)),
-        '9' => {
-            clear();
-            let network = profile::current_network().unwrap_or_else(|| "не видно".into());
-            println!("  Сеть: {BOLD}{network}{RESET}\n");
-            println!("  {DIM}[s]{RESET} запомнить состояние для этой сети");
-            println!("  {DIM}[a]{RESET} привести всё к профилю сети");
-            println!("  {DIM}[любая другая]{RESET} назад");
-            match read_key()? {
-                Some(KeyCode::Char('s')) => Some(match profile::save_current(cfg) {
-                    Ok((net, _)) => (true, format!("профиль сети «{net}» сохранён")),
-                    Err(e) => (false, e),
-                }),
-                Some(KeyCode::Char('a')) => Some(match profile::apply(cfg) {
-                    Ok(done) if done.is_empty() => (true, "всё уже как в профиле".to_string()),
-                    Ok(done) => (true, done.join(", ")),
-                    Err(e) => (false, e),
-                }),
-                _ => None,
-            }
-        }
-        _ => None,
-    })
-}
-
-fn read_key() -> Result<Option<KeyCode>, String> {
-    terminal::enable_raw_mode().map_err(|e| e.to_string())?;
-    let key = loop {
-        match event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => break Some(k.code),
-            Ok(Event::Resize(_, _)) => break None,
-            Ok(_) => continue,
-            Err(e) => {
-                terminal::disable_raw_mode().ok();
-                return Err(e.to_string());
-            }
-        }
-    };
-    terminal::disable_raw_mode().map_err(|e| e.to_string())?;
-    Ok(key)
-}
-
-fn clear() {
-    print!("\x1b[2J\x1b[H");
-    std::io::stdout().flush().ok();
-}
-
-fn draw(
-    status: &[(bool, String)],
-    message: Option<&(bool, String)>,
-    input: &str,
-    matches: &[Suggestion],
-    cursor: usize,
-) {
-    // Кадр собирается целиком и печатается одним куском поверх старого: экран
-    // не чистится, поэтому не мигает. Каждая строка затирает хвост прежней.
+fn draw(screen: &Screen, suggestions: &[Suggestion]) {
+    // Кадр печатается поверх прежнего, строка затирает строку: без очистки
+    // экрана нет мигания.
     let mut rows: Vec<String> = Vec::new();
     rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}"));
     rows.push(String::new());
-    for (ok, text) in status {
+    for (ok, text) in &screen.status {
         let (color, dot) = if *ok { (GREEN, "●") } else { (RED, "○") };
         rows.push(format!("  {color}{dot} {text}{RESET}"));
     }
     rows.push(String::new());
 
-    // Быстрые клавиши видны всегда — иначе они «пропадают» при наборе.
-    rows.push(format!(
-        "  {DIM}[1]{RESET} zapret вкл/выкл   {DIM}[2]{RESET} стратегия   {DIM}[3]{RESET} проверить"
-    ));
-    rows.push(format!(
-        "  {DIM}[4]{RESET} VPN               {DIM}[5]{RESET} Telegram    {DIM}[6]{RESET} QR на телефон"
-    ));
-    rows.push(format!(
-        "  {DIM}[7]{RESET} автоподбор        {DIM}[8]{RESET} раздача     {DIM}[9]{RESET} профиль сети"
-    ));
-    rows.push(format!("  {DIM}[q]{RESET} выход"));
+    // Ноды или, если их нет, вывод последней команды — место одно и то же.
+    if screen.nodes.is_empty() {
+        rows.push(format!("  {DIM}НОДЫ{RESET}  {DIM}подписки нет: набери vpn sub и вставь ссылку{RESET}"));
+        for _ in 0..NODE_ROWS {
+            rows.push(String::new());
+        }
+    } else {
+        rows.push(format!(
+            "  {DIM}НОДЫ{RESET}  {DIM}↑↓ — выбор, Enter — включить, p — замерить{RESET}"
+        ));
+        let first = screen
+            .node_at
+            .saturating_sub(NODE_ROWS - 1)
+            .min(screen.nodes.len().saturating_sub(NODE_ROWS.min(screen.nodes.len())));
+        for (offset, node) in screen.nodes.iter().skip(first).take(NODE_ROWS).enumerate() {
+            let index = first + offset;
+            let selected = index == screen.node_at;
+            let here = screen.current.as_deref() == Some(node.name.as_str());
+            let mark = if here { "●" } else { " " };
+            let delay = match node.delay {
+                None => format!("{DIM}—{RESET}"),
+                Some(None) => format!("{RED}молчит{RESET}"),
+                Some(Some(ms)) => {
+                    let color = if ms < 300 {
+                        GREEN
+                    } else if ms < 800 {
+                        YELLOW
+                    } else {
+                        RED
+                    };
+                    format!("{color}{ms} мс{RESET}")
+                }
+            };
+            if selected {
+                rows.push(format!("  {GREEN}▸{RESET} {mark} {:<26} {delay}", node.name));
+            } else {
+                rows.push(format!("    {mark} {:<26} {delay}", node.name));
+            }
+        }
+        for _ in screen.nodes.len()..NODE_ROWS {
+            rows.push(String::new());
+        }
+    }
     rows.push(String::new());
 
-    // Место под подсказки — всегда одной высоты, иначе строка ввода прыгает.
-    const ROWS: usize = 6;
-    let mut hints: Vec<String> = Vec::new();
-    if matches.is_empty() && !input.trim().is_empty() {
-        hints.push(format!("  {YELLOW}похожих команд нет{RESET}"));
-    } else {
-        let shown = matches.len().min(ROWS);
-        let first = cursor
-            .saturating_sub(ROWS - 1)
-            .min(matches.len().saturating_sub(shown));
-        for item in matches.iter().skip(first).take(ROWS) {
-            let selected = matches
-                .get(cursor)
-                .map(|c| std::ptr::eq(c, item))
-                .unwrap_or(false);
-            if selected {
-                hints.push(format!(
+    // Вывод команды — всегда одной высоты, чтобы ничего не прыгало.
+    let tail = screen.output.len().saturating_sub(OUTPUT_ROWS);
+    for row in 0..OUTPUT_ROWS {
+        match screen.output.get(tail + row) {
+            Some(line) => rows.push(format!("  {DIM}│{RESET} {line}")),
+            None => rows.push(String::new()),
+        }
+    }
+    rows.push(String::new());
+
+    if !suggestions.is_empty() {
+        for (row, item) in suggestions.iter().take(4).enumerate() {
+            if row == screen.suggestion_at.min(3) {
+                rows.push(format!(
                     "  {GREEN}▸ {}{RESET}  {DIM}{}{RESET}",
                     item.label, item.about
                 ));
             } else {
-                hints.push(format!("    {}  {DIM}{}{RESET}", item.label, item.about));
+                rows.push(format!("    {}  {DIM}{}{RESET}", item.label, item.about));
             }
         }
+        for _ in suggestions.len()..4 {
+            rows.push(String::new());
+        }
+    } else if !screen.input.trim().is_empty() {
+        rows.push(format!("  {YELLOW}похожих команд нет{RESET}"));
+        for _ in 0..3 {
+            rows.push(String::new());
+        }
+    } else {
+        rows.push(format!(
+            "  {DIM}набирай команду — покажу похожие · q — выход · r — обновить{RESET}"
+        ));
+        for _ in 0..3 {
+            rows.push(String::new());
+        }
     }
-    while hints.len() < ROWS {
-        hints.push(String::new());
-    }
-    rows.extend(hints);
 
-    rows.push(match message {
-        Some((ok, text)) => {
+    rows.push(match (&screen.busy, &screen.message) {
+        (Some(what), _) => format!("  {YELLOW}{what}…{RESET}"),
+        (None, Some((ok, text))) => {
             let color = if *ok { GREEN } else { YELLOW };
             format!("  {color}{text}{RESET}")
         }
-        None => String::new(),
+        _ => String::new(),
     });
     rows.push(String::new());
 
@@ -383,117 +535,7 @@ fn draw(
         frame.push_str(&row);
         frame.push_str("\x1b[K\r\n");
     }
-    frame.push_str(&format!("  {BOLD}›{RESET} {input}▏\x1b[K\x1b[J"));
-
+    frame.push_str(&format!("  {BOLD}›{RESET} {}▏\x1b[K\x1b[J", screen.input));
     print!("{frame}");
     std::io::stdout().flush().ok();
-}
-
-fn act(result: Result<(), String>, done: &str) -> (bool, String) {
-    match result {
-        Ok(()) => (true, done.to_string()),
-        Err(e) => (false, e),
-    }
-}
-
-fn toggle_zapret(cfg: &Config) -> (bool, String) {
-    let z = Zapret::new(cfg);
-    if z.state() == zapret::State::On {
-        act(z.stop(), "zapret выключен")
-    } else {
-        act(z.start(), "zapret включён")
-    }
-}
-
-fn toggle_telegram(cfg: &Config) -> (bool, String) {
-    let tg = Telegram::new(cfg);
-    if tg.running() {
-        act(tg.stop(), "прокси Telegram выключен")
-    } else {
-        act(tg.start(), "прокси Telegram включён")
-    }
-}
-
-fn toggle_share(cfg: &Config) -> (bool, String) {
-    let on = probe::port_open(cfg.share_port, Duration::from_millis(300));
-    let action = if on { "off" } else { "on" };
-    match crate::share_service_public(action, cfg.share_port) {
-        Ok(()) if on => (true, "раздача выключена".into()),
-        Ok(()) => (
-            true,
-            format!(
-                "раздача включена: {}:{}",
-                probe::lan_ip().map(|i| i.to_string()).unwrap_or_default(),
-                cfg.share_port
-            ),
-        ),
-        Err(e) => (false, e),
-    }
-}
-
-fn pick_strategy(cfg: &Config) -> Result<(), String> {
-    let z = Zapret::new(cfg);
-    let list = z.strategies();
-    if list.is_empty() {
-        return Ok(());
-    }
-    let current = z.strategy().unwrap_or_default();
-
-    clear();
-    println!("{BOLD}  СТРАТЕГИИ{RESET}  {DIM}(текущая помечена ●){RESET}\n");
-    for (i, name) in list.iter().enumerate() {
-        if *name == current {
-            println!("  {GREEN}{:>3} ● {name}{RESET}", i + 1);
-        } else {
-            println!("  {:>3}   {name}", i + 1);
-        }
-    }
-    print!("\n  Номер (пусто — оставить как есть): ");
-    std::io::stdout().flush().ok();
-
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(());
-    }
-    match z.set_strategy(answer) {
-        Ok(name) => println!("  {GREEN}Поставлена: {name}{RESET}"),
-        Err(e) => println!("  {RED}{e}{RESET}"),
-    }
-    pause();
-    Ok(())
-}
-
-fn show_qr(cfg: &Config) {
-    clear();
-    match Telegram::new(cfg).lan_link() {
-        Some(link) => match qr::encode(&link) {
-            Ok(grid) => {
-                print!("{}", qr::render(&grid, 2));
-                println!("  {link}");
-                println!("\n  {DIM}Камера телефона на QR — Telegram подхватит прокси.{RESET}");
-            }
-            Err(e) => println!("  {RED}{e}{RESET}"),
-        },
-        None => println!("  {YELLOW}Прокси ещё не запускался — включи его клавишей 5.{RESET}"),
-    }
-    pause();
-}
-
-fn pause() {
-    println!("\n  {DIM}Любая клавиша — назад{RESET}");
-    std::io::stdout().flush().ok();
-    if terminal::enable_raw_mode().is_ok() {
-        loop {
-            match event::read() {
-                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => break,
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
-        terminal::disable_raw_mode().ok();
-    } else {
-        std::thread::sleep(Duration::from_secs(2));
-    }
 }
