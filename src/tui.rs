@@ -142,29 +142,67 @@ pub struct Suggestion {
     pub about: String,
 }
 
-/// Похожие команды под набранным. Вставленная ссылка — особый случай: человек
-/// вставляет подписку и ждёт, что с ней что-то произойдёт, а не ищет команду
-/// с такими буквами.
+/// Похожие команды под набранным.
+///
+/// Две особые ситуации, без которых экран врал «похожих команд нет» на вполне
+/// осмысленный ввод: вставленная ссылка (человек вставляет подписку и ждёт
+/// действия, а не поиска команды с такими буквами) и команда с аргументами —
+/// «vpn use Турция» ни на что не похоже по буквам, но выполнить его надо.
 fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
     let typed = input.trim();
     if typed.is_empty() {
         return Vec::new();
     }
-    if typed.starts_with("http://") || typed.starts_with("https://") {
+    if let Some(url) = find_url(typed) {
         return vec![Suggestion {
-            line: format!("vpn sub {typed}"),
+            line: format!("vpn sub {url}"),
             label: "vpn sub <ссылка>".to_string(),
             about: "загрузить подписку по вставленной ссылке".to_string(),
         }];
     }
-    crate::picker::filter(items, typed)
+
+    let mut found: Vec<Suggestion> = crate::picker::filter(items, typed)
         .into_iter()
         .map(|index| Suggestion {
             line: items[index].label.clone(),
             label: items[index].label.clone(),
             about: items[index].hint.clone().unwrap_or_default(),
         })
-        .collect()
+        .collect();
+
+    // Набранное с аргументами ставим первым: раз человек дописал аргумент,
+    // именно это он и хочет запустить, а не голую команду из списка.
+    if with_arguments(typed) {
+        found.insert(
+            0,
+            Suggestion {
+                line: typed.to_string(),
+                label: typed.to_string(),
+                about: "выполнить как набрано".to_string(),
+            },
+        );
+    }
+    found
+}
+
+/// Ссылка в набранном — где бы она ни стояла.
+fn find_url(text: &str) -> Option<String> {
+    let at = text.find("https://").or_else(|| text.find("http://"))?;
+    Some(text[at..].split_whitespace().next()?.to_string())
+}
+
+/// Первое слово — известная команда, а дальше что-то ещё.
+fn with_arguments(typed: &str) -> bool {
+    let mut words = typed.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if words.next().is_none() {
+        return false;
+    }
+    crate::commands()
+        .iter()
+        .any(|(name, _)| name.split_whitespace().next() == Some(first))
 }
 
 /// Выйти из сырого режима на время действия: команды печатают обычным

@@ -106,6 +106,21 @@ pub fn dispatch_with(
     }
 }
 
+/// Ошибка на незнакомое подслово: подсказываем ближайшее из тех, что есть у
+/// этой команды, — «nods» почти всегда означает «nodes».
+fn unknown_sub(prefix: &str, typed: &str) -> String {
+    let all = commands();
+    let family: Vec<(&str, &str)> = all
+        .iter()
+        .filter(|(name, _)| name.starts_with(&format!("{prefix} ")))
+        .copied()
+        .collect();
+    match picker::closest(&family, typed, 1).first() {
+        Some(close) => format!("нет такого: {prefix} {typed}. Похоже на «net {close}»"),
+        None => format!("нет такого: {prefix} {typed}"),
+    }
+}
+
 /// Команды пульта для палитры: что набрать и что оно делает.
 pub fn commands() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -262,9 +277,7 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!(
-            "net vpn on|off|sub|update|nodes|use|auto|core|log, а не «{other}»"
-        )),
+        Some(other) => Err(unknown_sub("vpn", other)),
     }
 }
 
