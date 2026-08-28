@@ -5,6 +5,12 @@
 //! готовый JSON. Поэтому запрос повторяется с разными User-Agent, пока не
 //! придёт то, что мы умеем разобрать. Это и есть «понимает любую подписку»:
 //! не угадать формат, а перебрать личины и разобрать всё, что прислали.
+//!
+//! Отдельная история — панели с учётом устройств (Remnawave и подобные). Они
+//! отдают настоящие ноды только клиенту, который присылает идентификатор
+//! устройства в заголовке `x-hwid`; всем остальным приходит заглушка вида
+//! «Приложение не поддерживается». Поэтому идентификатор у нас есть свой,
+//! постоянный, и уходит с каждым запросом — как это делает Happ.
 
 use crate::json::{self, Json};
 use std::process::Command;
@@ -198,6 +204,7 @@ impl Node {
 
 /// Скачать подписку, перебирая личины, пока не разберётся хоть одна нода.
 pub fn fetch(url: &str, timeout: Duration) -> Result<Vec<Node>, String> {
+    let hwid = hwid();
     let mut last_error = String::from("подписка не ответила");
     for agent in AGENTS {
         let output = Command::new("curl")
@@ -209,6 +216,14 @@ pub fn fetch(url: &str, timeout: Duration) -> Result<Vec<Node>, String> {
                 &timeout.as_secs().to_string(),
                 "-A",
                 agent,
+                "-H",
+                &format!("x-hwid: {hwid}"),
+                "-H",
+                &format!("x-device-os: {}", device_os()),
+                "-H",
+                &format!("x-ver-os: {}", os_version()),
+                "-H",
+                "x-device-model: netpult",
                 url,
             ])
             .output()
@@ -219,12 +234,104 @@ pub fn fetch(url: &str, timeout: Duration) -> Result<Vec<Node>, String> {
         }
         let body = String::from_utf8_lossy(&output.stdout).to_string();
         match parse(&body) {
-            Ok(nodes) if !nodes.is_empty() => return Ok(nodes),
+            Ok(nodes) if !nodes.is_empty() => {
+                if let Some(message) = panel_message(&nodes) {
+                    // Дальше перебирать личины смысла нет: панель ответила
+                    // осмысленно, просто отказом.
+                    return Err(format!("панель вместо нод прислала сообщение: {message}"));
+                }
+                return Ok(nodes);
+            }
             Ok(_) => last_error = format!("под личиной {agent} пришёл пустой список"),
             Err(e) => last_error = format!("под личиной {agent}: {e}"),
         }
     }
     Err(last_error)
+}
+
+/// Панели с учётом устройств вместо отказа присылают «ноды»-заглушки на
+/// несуществующем адресе, а текст кладут в имя: «Лимит устройств!», «Скачайте
+/// Happ». Молча собрать из этого конфиг — худшее, что можно сделать: туннель
+/// поднимется в никуда.
+fn panel_message(nodes: &[Node]) -> Option<String> {
+    let stub = |n: &Node| n.server == "0.0.0.0" || n.server == "127.0.0.1" || n.port <= 1;
+    if !nodes.iter().all(stub) {
+        return None;
+    }
+    let names: Vec<String> = nodes
+        .iter()
+        .map(|n| n.name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    Some(if names.is_empty() {
+        "ноды без адреса".to_string()
+    } else {
+        names.join(" / ")
+    })
+}
+
+/// Постоянный идентификатор устройства. Панель считает по нему слоты, поэтому
+/// он обязан переживать перезапуски: заводится один раз и лежит рядом с
+/// остальным состоянием.
+pub fn hwid() -> String {
+    let path = crate::config::state_dir().join("hwid");
+    if let Ok(saved) = std::fs::read_to_string(&path) {
+        let saved = saved.trim().to_string();
+        if !saved.is_empty() {
+            return saved;
+        }
+    }
+    let generated = generate_hwid();
+    let _ = crate::config::state_dir_ensure();
+    let _ = std::fs::write(&path, &generated);
+    generated
+}
+
+/// Идентификатор берётся из machine-id, если система его даёт, иначе из имени
+/// узла и времени. Вид — как у Happ, шестнадцатеричная строка.
+fn generate_hwid() -> String {
+    let seed = std::fs::read_to_string("/etc/machine-id")
+        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if seed.len() >= 32 {
+        return seed[..32].to_string();
+    }
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "netpult".into());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hash: u128 = 0xcbf29ce484222325;
+    for byte in host.bytes().chain(now.to_le_bytes()) {
+        hash ^= byte as u128;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:032x}")
+}
+
+fn device_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+fn os_version() -> String {
+    let output = if cfg!(windows) {
+        Command::new("cmd").args(["/C", "ver"]).output()
+    } else {
+        Command::new("uname").arg("-r").output()
+    };
+    output
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// Разобрать тело подписки в любом из ходовых форматов.
