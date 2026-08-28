@@ -1,12 +1,15 @@
 //! netpult — один пульт для обхода блокировок: zapret, VPN и прокси Telegram.
 
 mod config;
+mod json;
 mod probe;
 mod profile;
 mod split;
 mod qr;
 mod share;
+mod singbox;
 mod socks;
+mod sub;
 mod telegram;
 mod tune;
 mod tui;
@@ -46,11 +49,7 @@ fn main() {
         "restart" => Zapret::new(&cfg).restart().map(|_| print_status(&cfg)),
         "toggle" => toggle_zapret(&cfg),
         "strat" | "strategy" => strategy(&cfg, rest.first().copied()),
-        "vpn" => match rest.first().copied() {
-            None | Some("on") | Some("open") => Vpn::new(&cfg).open(),
-            Some("off") => Vpn::new(&cfg).close(),
-            Some(other) => Err(format!("net vpn on|off, а не «{other}»")),
-        },
+        "vpn" => vpn_command(&cfg, &rest),
         "tg" | "telegram" => telegram_command(&cfg, &rest),
         "test" => {
             run_test_public(&cfg);
@@ -91,6 +90,46 @@ fn quiet_broken_pipe() {
         }
         previous(info);
     }));
+}
+
+/// `net vpn` — управление туннелем: клиент Happ там, где он есть, и своё ядро
+/// sing-box там, где Happ не встаёт (macOS 11, например).
+fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    match rest.first().copied() {
+        None | Some("on") | Some("open") => Vpn::new(cfg).open(),
+        Some("off") => Vpn::new(cfg).close(),
+        Some("sub") | Some("subscription") => {
+            let url = rest
+                .get(1)
+                .copied()
+                .ok_or("нужна ссылка: net vpn sub <ссылка на подписку>")?;
+            vpn_subscribe(url)
+        }
+        Some("nodes") => {
+            let nodes = sub::load_nodes()?;
+            for (i, node) in nodes.iter().enumerate() {
+                println!("{:>3}. {}", i + 1, node.name);
+            }
+            println!("\nвсего нод: {}", nodes.len());
+            Ok(())
+        }
+        Some(other) => Err(format!("net vpn on|off|sub|nodes, а не «{other}»")),
+    }
+}
+
+fn vpn_subscribe(url: &str) -> Result<(), String> {
+    println!("Забираю подписку...");
+    let mut nodes = sub::fetch(url, Duration::from_secs(30))?;
+    sub::dedupe_names(&mut nodes);
+    let config = singbox::build_config(&nodes)?;
+    let path = sub::save(url, &nodes, &config)?;
+    println!(
+        "{GREEN}Разобрано нод: {}{RESET}\nКонфиг: {}",
+        nodes.len(),
+        path.display()
+    );
+    println!("Список нод — net vpn nodes");
+    Ok(())
 }
 
 fn toggle_zapret(cfg: &Config) -> Result<(), String> {
@@ -811,6 +850,8 @@ fn print_help() {
 {BOLD}VPN{RESET} — для геоблока, когда сервис режет по стране
   net vpn              открыть окно клиента
   net vpn off          закрыть
+  net vpn sub <ссыл>   разобрать подписку и собрать конфиг своего ядра
+  net vpn nodes        ноды из подписки
 
 {BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
   net tg on | off      включить / выключить
