@@ -125,7 +125,7 @@ pub fn closest(commands: &[(&str, &str)], query: &str, limit: usize) -> Vec<Stri
 }
 
 /// Строки, подходящие под запрос, в порядке «чем точнее, тем выше».
-fn filter(items: &[Item], query: &str) -> Vec<usize> {
+pub fn filter(items: &[Item], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..items.len()).collect();
     }

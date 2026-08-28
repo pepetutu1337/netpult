@@ -237,13 +237,6 @@ impl<'a> Core<'a> {
     }
 }
 
-/// Ноды и их задержки: имя, миллисекунды, признак текущей.
-pub struct NodeStatus {
-    pub name: String,
-    pub delay: Option<u32>,
-    pub current: bool,
-}
-
 /// Кто сейчас выбран в селекторе.
 pub fn current_node() -> Option<String> {
     let body = api_get(&format!("/proxies/{SELECTOR}"))?;
