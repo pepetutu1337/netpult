@@ -171,6 +171,7 @@ impl<'a> Core<'a> {
             return Ok(());
         }
         let bin = self.bin()?;
+        println!("Нужны права root — TUN без них не поднять.");
         let config = crate::sub::config_path();
         if !config.exists() {
             return Err("подписка ещё не загружена — net vpn sub <ссылка>".into());
@@ -203,14 +204,30 @@ impl<'a> Core<'a> {
         if !status {
             return Err("ядро не запустилось — смотри net vpn log".into());
         }
-        // Движку нужно время поднять интерфейс и открыть API.
-        for _ in 0..20 {
+
+        // Первый запуск дольше остальных: ядро тянет списки правил для
+        // российского сплита. Дальше они лежат в кэше и старт мгновенный.
+        // Молчать эти секунды нельзя — со стороны это выглядит как зависание.
+        println!("Ядро запущено, поднимаю туннель...");
+        let started = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(60);
+        let mut said = 0;
+        while started.elapsed() < limit {
             if self.state() == State::Up {
+                println!("Туннель поднят за {:.0} с", started.elapsed().as_secs_f32());
                 return Ok(());
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            let seconds = started.elapsed().as_secs();
+            if seconds > said {
+                said = seconds;
+                if seconds == 3 {
+                    println!("  списки правил тянутся при первом запуске, это разово");
+                }
+                println!("  жду... {seconds} с");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        Err("ядро запущено, но API молчит — смотри net vpn log".into())
+        Err("ядро не открыло API за минуту — смотри net vpn log".into())
     }
 
     pub fn stop(&self) -> Result<(), String> {

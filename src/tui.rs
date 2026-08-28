@@ -51,6 +51,7 @@ struct Screen {
     output: Vec<String>,
     message: Option<(bool, String)>,
     busy: Option<String>,
+    busy_since: Instant,
 }
 
 pub fn run(cfg: &Config) -> Result<(), String> {
@@ -65,6 +66,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         output: Vec::new(),
         message: None,
         busy: None,
+        busy_since: Instant::now(),
     };
     let commands = crate::commands();
     let items: Vec<crate::picker::Item> = commands
@@ -279,6 +281,7 @@ fn start_ping(screen: &mut Screen, sender: Sender<Work>) {
         node.delay = None;
     }
     screen.busy = Some("меряю задержки".into());
+    screen.busy_since = Instant::now();
     screen.message = None;
     std::thread::spawn(move || {
         let total = names.len();
@@ -297,6 +300,12 @@ fn start_ping(screen: &mut Screen, sender: Sender<Work>) {
 /// перехватывается построчно, экран остаётся живым, а печать команд не нужно
 /// переписывать ради интерактивности.
 fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
+    // Команды, которые просят пароль, идут иначе: экран уступает им терминал
+    // целиком, иначе sudo некуда спросить и всё повисает.
+    if needs_terminal(line) {
+        screen.message = Some(hand_over(line));
+        return;
+    }
     if screen.busy.is_some() {
         screen.message = Some((false, "подожди, предыдущее ещё идёт".into()));
         return;
@@ -308,6 +317,7 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
     let args: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     screen.output.clear();
     screen.busy = Some(line.to_string());
+    screen.busy_since = Instant::now();
     screen.message = None;
     let shown = line.to_string();
     std::thread::spawn(move || {
@@ -359,6 +369,40 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
             },
         ));
     });
+}
+
+/// Просит ли команда пароль.
+fn needs_terminal(line: &str) -> bool {
+    ["vpn on", "vpn off", "watch install", "watch uninstall"]
+        .iter()
+        .any(|name| line == *name || line.starts_with(&format!("{name} ")))
+}
+
+/// Отдать терминал команде: выйти из сырого режима, дать ей напечатать своё и
+/// спросить пароль, дождаться и вернуть экран.
+fn hand_over(line: &str) -> (bool, String) {
+    let Ok(exe) = std::env::current_exe() else {
+        return (false, "не найти самого себя на диске".into());
+    };
+    let args: Vec<&str> = line.split_whitespace().collect();
+    terminal::disable_raw_mode().ok();
+    print!("\x1b[2J\x1b[H");
+    println!("{DIM}  net {line}{RESET}\n");
+    std::io::stdout().flush().ok();
+
+    let status = std::process::Command::new(exe).args(&args).status();
+
+    println!("\n{DIM}  нажми любую клавишу{RESET}");
+    std::io::stdout().flush().ok();
+    terminal::enable_raw_mode().ok();
+    let _ = event::read();
+    print!("\x1b[2J");
+
+    match status {
+        Ok(status) if status.success() => (true, format!("готово: {line}")),
+        Ok(_) => (false, format!("не вышло: {line} — смотри net vpn log")),
+        Err(e) => (false, format!("не запустилось: {e}")),
+    }
 }
 
 fn strip_colors(text: &str) -> String {
@@ -553,7 +597,16 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     }
 
     rows.push(match (&screen.busy, &screen.message) {
-        (Some(what), _) => format!("  {YELLOW}{what}…{RESET}"),
+        (Some(what), _) => {
+            // Крутилка и секунды: видно, что дело идёт, а не встало.
+            const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+            let elapsed = screen.busy_since.elapsed();
+            let frame = FRAMES[(elapsed.as_millis() / 120) as usize % FRAMES.len()];
+            format!(
+                "  {YELLOW}{frame} {what}… {:.0} с{RESET}",
+                elapsed.as_secs_f32()
+            )
+        }
         (None, Some((ok, text))) => {
             let color = if *ok { GREEN } else { YELLOW };
             format!("  {color}{text}{RESET}")
