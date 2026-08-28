@@ -215,6 +215,14 @@ impl<'a> Core<'a> {
         while started.elapsed() < limit {
             if self.state() == State::Up {
                 println!("Туннель поднят за {:.0} с", started.elapsed().as_secs_f32());
+                // Автоподбор до первого замера держит первую ноду списка —
+                // живая она или мёртвая, ему пока неоткуда знать. Гоним замер
+                // сразу, иначе первые минуты трафик идёт наугад.
+                println!("Проверяю ноды, чтобы автоподбор выбрал живую...");
+                measure_group(AUTO, 5000);
+                if let Some((name, _)) = active_node() {
+                    println!("Нода: {name}");
+                }
                 return Ok(());
             }
             let seconds = started.elapsed().as_secs();
@@ -304,6 +312,14 @@ pub fn select(name: &str) -> Result<(), String> {
     } else {
         Err(format!("нода «{name}» не выбралась — ядро её не знает?"))
     }
+}
+
+/// Заставить движок перемерить всю группу разом: он сам разошлёт пробы по
+/// нодам и переставит автоподбор на живую.
+pub fn measure_group(group: &str, timeout_ms: u32) {
+    // Именно `/proxies/<группа>/delay`: путь `/group/.../delay` движок знает,
+    // но отвечает пустотой и проб не рассылает.
+    let _ = delay(group, timeout_ms);
 }
 
 /// Замерить задержку одной ноды глазами самого движка.

@@ -43,6 +43,7 @@ struct Node {
 struct Screen {
     status: Vec<(bool, String)>,
     status_taken: Instant,
+    current_taken: Instant,
     nodes: Vec<Node>,
     node_at: usize,
     /// Нода, через которую идёт трафик, и выбрана ли она автоподбором.
@@ -59,6 +60,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     let mut screen = Screen {
         status: status_lines(cfg),
         status_taken: Instant::now(),
+        current_taken: Instant::now(),
         nodes: load_nodes(),
         node_at: 0,
         current: None,
@@ -110,6 +112,12 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         if screen.status_taken.elapsed() > Duration::from_secs(10) && screen.busy.is_none() {
             screen.status = status_lines(cfg);
             screen.status_taken = Instant::now();
+        }
+        // Автоподбор переставляет ноду сам, без нашего ведома: спрашиваем, кто
+        // сейчас в деле, иначе в заголовке висит давно смененная страна.
+        if screen.current_taken.elapsed() > Duration::from_secs(3) && screen.busy.is_none() {
+            screen.current = singbox::active_node();
+            screen.current_taken = Instant::now();
         }
 
         let suggestions = suggest(&items, &screen.input);
