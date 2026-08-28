@@ -155,7 +155,28 @@ fn telegram_command(cfg: &Config, action: Option<&str>) -> Result<(), String> {
             Ok(())
         }
         Some("qr") => show_qr(cfg),
-        Some(other) => Err(format!("net tg on|off|qr|link, а не «{other}»")),
+        Some("newsecret") => {
+            // Сменить секрет прокси — только по этой команде. Секрет постоянный:
+            // сам не крутится при перезапусках, чтобы настроенный Telegram не
+            // отваливался. После смены на телефоне надо пересканировать QR.
+            let tg = Telegram::new(cfg);
+            let was_running = tg.running();
+            if was_running {
+                tg.stop().ok();
+            }
+            std::fs::remove_file(cfg.tg_secret_path()).ok();
+            std::fs::remove_file(config::state_dir().join("tglock.secret")).ok();
+            std::fs::remove_file(config::home().join(".config/tglock/secret")).ok();
+            println!("{GREEN}Секрет сброшен — новый создастся при запуске.{RESET}");
+            if was_running {
+                tg.start()?;
+                println!("{DIM}Прокси перезапущен. Пересканируй QR на телефоне: net tg qr{RESET}");
+            } else {
+                println!("{DIM}Включи прокси: net tg on{RESET}");
+            }
+            Ok(())
+        }
+        Some(other) => Err(format!("net tg on|off|qr|link|newsecret, а не «{other}»")),
     }
 }
 
@@ -304,6 +325,33 @@ fn share_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             print_share_hint(port, None);
             Ok(())
         }
+        Some("password") | Some("pass") => {
+            // Просто показать — ничего не меняя.
+            match share_password(cfg) {
+                Some(p) => println!("Логин {BOLD}netpult{RESET}, пароль {BOLD}{p}{RESET}"),
+                None => println!("{DIM}Пароль не задан (раздача открыта).{RESET}"),
+            }
+            Ok(())
+        }
+        Some("newpass") => {
+            // Сменить пароль — только по этой явной команде. Старый QR/логин на
+            // телефоне после этого перестанут пускать, придётся ввести новый.
+            if cfg.share_password.is_some() {
+                return Err(
+                    "пароль задан вручную в настройках (share_password) — смени там".into(),
+                );
+            }
+            let fresh = random_password();
+            config::state_dir_ensure().map_err(|e| e.to_string())?;
+            std::fs::write(config::state_dir().join("share.pass"), &fresh)
+                .map_err(|e| e.to_string())?;
+            println!("{GREEN}Новый пароль раздачи: {BOLD}{fresh}{RESET}");
+            println!("{DIM}Старый больше не пускает. На телефоне впиши новый.{RESET}");
+            if probe::port_open(port, std::time::Duration::from_millis(400)) {
+                share_service_public("on", port).ok(); // перезапустить с новым паролем
+            }
+            Ok(())
+        }
         None | Some("status") => {
             if probe::port_open(port, std::time::Duration::from_millis(400)) {
                 println!("{GREEN}Раздача работает{RESET}");
@@ -314,7 +362,7 @@ fn share_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!("net share [on|off|status], а не «{other}»")),
+        Some(other) => Err(format!("net share [on|off|status|password|newpass|open], а не «{other}»")),
     }
 }
 
@@ -671,7 +719,9 @@ fn print_help() {
 
 {BOLD}раздача{RESET} — телефон ходит в интернет через этот компьютер
   net share on|off     включить / выключить прокси для телефона (пароль обязателен)
-  net share status     адрес и порт для настроек Wi-Fi телефона
+  net share status     адрес, порт, пароль и подключённые устройства
+  net share password   показать текущий пароль
+  net share newpass    сменить пароль (по твоей команде, сам не меняется)
 
 {BOLD}сплит{RESET} — через ноду только нужные домены, остальное напрямую
   net split on|off     включить / выключить сплит-прокси
@@ -685,6 +735,7 @@ fn print_help() {
 {BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
   net tg on | off      включить / выключить
   net tg qr            QR для телефона
-  net tg link          ссылки для компьютера и телефона"
+  net tg link          ссылки для компьютера и телефона
+  net tg newsecret     сменить секрет прокси (QR на телефоне придётся пересканировать)"
     );
 }
