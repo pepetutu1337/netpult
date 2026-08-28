@@ -171,6 +171,9 @@ impl<'a> Core<'a> {
             return Ok(());
         }
         let bin = self.bin()?;
+        // TUN без root не поднять никак: проверяем возможность спросить пароль
+        // до запуска, иначе sudo молча упрётся в невидимый запрос.
+        crate::sudoer::ready()?;
         println!("Нужны права root — TUN без них не поднять.");
         let config = crate::sub::config_path();
         if !config.exists() {
@@ -195,7 +198,7 @@ impl<'a> Core<'a> {
                 .map(|_| true)
                 .map_err(|e| format!("ядро не запустилось: {e}"))?
         } else {
-            Command::new("sudo")
+            crate::sudoer::command()
                 .args(["sh", "-c", &command])
                 .status()
                 .map_err(|e| format!("sudo не запустился: {e}"))?
@@ -239,12 +242,13 @@ impl<'a> Core<'a> {
     }
 
     pub fn stop(&self) -> Result<(), String> {
+        crate::sudoer::ready()?;
         let pid_path = self.pid_path();
         let pid = std::fs::read_to_string(&pid_path)
             .ok()
             .and_then(|t| t.trim().parse::<u32>().ok());
         let ok = match pid {
-            Some(pid) if !cfg!(windows) => Command::new("sudo")
+            Some(pid) if !cfg!(windows) => crate::sudoer::command()
                 .args(["kill", &pid.to_string()])
                 .status()
                 .map(|s| s.success())
@@ -293,6 +297,11 @@ pub fn active_node() -> Option<(String, bool)> {
 
 /// Переключить ноду. Без перезапуска ядра — соединения переедут сами.
 pub fn select(name: &str) -> Result<(), String> {
+    // Без поднятого ядра выбирать нечего, и «ядро её не знает» тут врало бы:
+    // ядра нет вовсе.
+    if Core::state_now() != State::Up {
+        return Err("туннель не поднят — сначала net vpn on".into());
+    }
     let body = format!("{{\"name\": {}}}", crate::json::escape(name));
     let out = Command::new("curl")
         .args([

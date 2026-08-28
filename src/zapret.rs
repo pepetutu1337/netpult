@@ -131,18 +131,11 @@ impl<'a> Zapret<'a> {
             // и дальше не стартует вовсе, пока счётчик не сброшен. Сбрасываем
             // молча: для «включи обход» это внутренняя кухня systemd.
             if action != "stop" {
-                let _ = Command::new("sudo")
-                    .args(["systemctl", "reset-failed", &self.cfg.zapret_service])
-                    .status();
+                let _ = systemctl("reset-failed", &self.cfg.zapret_service);
             }
-            let status = Command::new("sudo")
-                .args(["systemctl", action, &self.cfg.zapret_service])
-                .status()
-                .map_err(|e| format!("не запустился systemctl: {e}"))?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("systemctl {action} завершился с ошибкой"))
+            match systemctl(action, &self.cfg.zapret_service) {
+                Ok(()) => Ok(()),
+                Err(trouble) => Err(format!("systemctl {action}: {trouble}")),
             }
         } else {
             Err(format!(
@@ -151,6 +144,39 @@ impl<'a> Zapret<'a> {
             ))
         }
     }
+}
+
+/// Выполнить действие над службой.
+///
+/// Сперва без sudo: во многих сборках polkit разрешает управлять службой
+/// хозяину активного сеанса, и тогда пароль спрашивать не за что. Пароль
+/// просим только если без него правда не вышло.
+fn systemctl(action: &str, service: &str) -> Result<(), String> {
+    let plain = Command::new("systemctl")
+        .args([action, service])
+        .output()
+        .map_err(|e| format!("не запустился systemctl: {e}"))?;
+    if plain.status.success() {
+        return Ok(());
+    }
+    crate::sudoer::ready()?;
+    let out = crate::sudoer::command()
+        .args(["systemctl", action, service])
+        .output()
+        .map_err(|e| format!("не запустился sudo: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let trouble = String::from_utf8_lossy(&out.stderr);
+    if trouble.contains("password is required") || trouble.contains("пароль") {
+        return Err(crate::sudoer::NEED_PASSWORD.to_string());
+    }
+    Err(trouble
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("не вышло")
+        .to_string())
 }
 
 fn list_bat(dir: &PathBuf, keep: impl Fn(&str) -> bool) -> Vec<String> {

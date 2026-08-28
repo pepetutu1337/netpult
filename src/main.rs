@@ -6,7 +6,9 @@ mod picker;
 mod probe;
 mod profile;
 mod split;
+mod sudoer;
 mod qr;
+mod route;
 mod share;
 mod singbox;
 mod socks;
@@ -69,13 +71,14 @@ pub fn dispatch_with(
             print_status(cfg);
             Ok(())
         }
-        "on" => Zapret::new(cfg).start().map(|_| print_status(cfg)),
-        "off" => Zapret::new(cfg).stop().map(|_| print_status(cfg)),
-        "restart" => Zapret::new(cfg).restart().map(|_| print_status(cfg)),
+        "on" => zapret_action(cfg, "Включаю обход", |z| z.start()),
+        "off" => zapret_action(cfg, "Выключаю обход", |z| z.stop()),
+        "restart" => zapret_action(cfg, "Перезапускаю обход", |z| z.restart()),
         "toggle" => toggle_zapret(cfg),
         "strat" | "strategy" => strategy(cfg, rest.first().copied()),
         "vpn" => vpn_command(cfg, &rest),
         "tg" | "telegram" => telegram_command(cfg, &rest),
+        "path" | "route" | "how" => route::report(cfg, rest.contains(&"--deep")),
         "test" => {
             run_test_public(cfg);
             Ok(())
@@ -126,6 +129,7 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
     vec![
         ("status", "состояние всего и внешний адрес"),
         ("test", "проверить YouTube, Discord, Telegram и скорость"),
+        ("path", "через что идёт интернет и что чему мешает"),
         ("on", "включить zapret"),
         ("off", "выключить zapret"),
         ("restart", "перезапустить zapret"),
@@ -389,6 +393,24 @@ fn vpn_subscribe(url: &str) -> Result<(), String> {
         path.display()
     );
     println!("Список нод — net vpn nodes");
+    Ok(())
+}
+
+/// Общая обвязка для «включи/выключи/перезапусти»: сказать, что делаем, до
+/// того как делать, и показать итог. Молчание в этом месте выглядит зависанием
+/// даже когда всё занимает полсекунды.
+fn zapret_action(
+    cfg: &Config,
+    what: &str,
+    action: impl Fn(&Zapret) -> Result<(), String>,
+) -> Result<(), String> {
+    println!("{what}...");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    action(&Zapret::new(cfg))?;
+    for (ok, line) in status_lines(cfg) {
+        let color = if ok { GREEN } else { RED };
+        println!("{color}{line}{RESET}");
+    }
     Ok(())
 }
 
@@ -1074,8 +1096,9 @@ fn print_help() {
 {BOLD}экран{RESET}
   net                  открыть экран: состояние, ноды, строка команд
   {DIM}в строке набирается любая команда отсюда — покажет похожие;
-  пока строка пуста: ↑↓ — нода, Enter — включить её, p — замерить
-  задержки, r — обновить, q — выход{RESET}
+  пока строка пуста: ↑↓ и колесо мыши — нода, Enter — включить её,
+  p — замерить задержки, r — обновить, q — выход;
+  ссылку на подписку можно просто вставить в строку{RESET}
 
 {BOLD}zapret{RESET} — обход DPI: YouTube, Discord
   net on               включить
@@ -1138,6 +1161,10 @@ fn print_help() {
 
 {BOLD}прочее{RESET}
   net status           состояние всего и внешний адрес
+  net path             через что идёт интернет: свой обход, чужой VPN,
+                       обход на роутере, и что чему мешает
+  net path --deep      то же, но с проверкой: снимет свой обход на пару
+                       секунд и посмотрит, открывается ли без него
   net test             проверить YouTube, Discord, Telegram и скорость
   net version          версия
   net help             эта справка"

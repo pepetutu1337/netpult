@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::singbox;
 use crate::sub;
 use crate::{status_lines, BOLD, DIM, GREEN, RED, RESET, YELLOW};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::terminal;
 use std::io::{BufRead, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -54,6 +54,8 @@ struct Screen {
     message: Option<(bool, String)>,
     busy: Option<String>,
     busy_since: Instant,
+    /// Последняя запущенная команда — чтобы повторить её после пароля.
+    last: Option<String>,
 }
 
 pub fn run(cfg: &Config) -> Result<(), String> {
@@ -70,6 +72,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         message: None,
         busy: None,
         busy_since: Instant::now(),
+        last: None,
     };
     let commands = crate::commands();
     let items: Vec<crate::picker::Item> = commands
@@ -82,10 +85,16 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     // Свой буфер экрана: кадр рисуется поверх себя, а история терминала
     // остаётся нетронутой. Без этого длинный вывод прокручивал экран, и
     // заголовок печатался снова и снова.
+    //
+    // Колесо мыши терминал шлёт как управляющую последовательность. Пока её
+    // никто не разбирает, она долетает до строки ввода россыпью знаков — на
+    // экране будто сам собой набирается мусор. Забираем мышь себе и толкуем
+    // колесо как движение по списку нод.
     let _ = crossterm::execute!(
         std::io::stdout(),
         terminal::EnterAlternateScreen,
-        event::EnableBracketedPaste
+        event::EnableBracketedPaste,
+        event::EnableMouseCapture
     );
     print!("\x1b[2J");
 
@@ -101,6 +110,22 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                 }
                 Work::Done(ok, text) => {
                     screen.busy = None;
+                    // Пароль спрашиваем не заранее, а по надобности: там, где
+                    // хватает polkit, лишний запрос только раздражает.
+                    if !ok && text.contains(crate::sudoer::NEED_PASSWORD) {
+                        if let Some(again) = screen.last.clone() {
+                            match ask_password(&again) {
+                                Ok(()) => {
+                                    start_command(&mut screen, sender.clone(), &again);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    screen.message = Some((false, e));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     screen.message = Some((ok, text));
                     screen.status = status_lines(cfg);
                     screen.status_taken = Instant::now();
@@ -135,6 +160,14 @@ pub fn run(cfg: &Config) -> Result<(), String> {
             Ok(e) => e,
             Err(e) => break Err(e.to_string()),
         };
+        if let Event::Mouse(mouse) = &event {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => move_node(&mut screen, -1),
+                MouseEventKind::ScrollDown => move_node(&mut screen, 1),
+                _ => {}
+            }
+            continue;
+        }
         if let Event::Paste(text) = &event {
             screen.input.push_str(text.trim());
             screen.suggestion_at = 0;
@@ -227,6 +260,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
 
     let _ = crossterm::execute!(
         std::io::stdout(),
+        event::DisableMouseCapture,
         event::DisableBracketedPaste,
         terminal::LeaveAlternateScreen
     );
@@ -320,8 +354,8 @@ fn start_ping(screen: &mut Screen, sender: Sender<Work>) {
 /// перехватывается построчно, экран остаётся живым, а печать команд не нужно
 /// переписывать ради интерактивности.
 fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
-    // Команды, которые просят пароль, идут иначе: экран уступает им терминал
-    // целиком, иначе sudo некуда спросить и всё повисает.
+    // Вывод, который не лезет в панель на восемь строк, показываем во весь
+    // терминал: калечить QR-код рамкой незачем.
     if needs_terminal(line) {
         screen.message = Some(hand_over(line));
         return;
@@ -339,6 +373,7 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
     screen.busy = Some(line.to_string());
     screen.busy_since = Instant::now();
     screen.message = None;
+    screen.last = Some(line.to_string());
     let shown = line.to_string();
     std::thread::spawn(move || {
         let child = std::process::Command::new(exe)
@@ -346,6 +381,9 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
             // Внутри экрана списки рисует сам экран: подпроцессу интерактив
             // запрещён, иначе его управляющие коды лезут в панель вывода.
             .env("NETPULT_PLAIN", "1")
+            // Пароля тут не спросишь: пусть sudo сразу скажет, что его нет,
+            // вместо того чтобы ждать ответа в пустоту.
+            .env(crate::sudoer::NOASK, "1")
             // Клавиатура принадлежит экрану: без этого подпроцесс перехватывал
             // бы нажатия у себя.
             .stdin(std::process::Stdio::null())
@@ -391,21 +429,41 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
     });
 }
 
-/// Нужен ли команде весь экран.
-///
-/// Две причины: она спрашивает пароль (sudo некуда спросить, если клавиатура
-/// у нас) или её вывод не лезет в панель на восемь строк — QR-код, справка,
-/// длинные списки. Панель такой вывод не показывает, а калечит.
+/// Нужен ли команде весь экран: её вывод не лезет в панель на восемь строк.
+/// QR-код, справка, длинные списки — панель такой вывод не показывает, а
+/// калечит. Пароль сюда больше не относится: его спрашивают отдельно.
 fn needs_terminal(line: &str) -> bool {
-    const PASSWORD: [&str; 4] = ["vpn on", "vpn off", "watch install", "watch uninstall"];
-    const BIG: [&str; 12] = [
-        "tg qr", "tg link", "help", "test", "tune", "status", "strat", "split list", "split log",
-        "share status", "vpn log", "watch log",
+    const BIG: [&str; 13] = [
+        "tg qr", "tg link", "help", "test", "tune", "status", "path", "strat", "split list",
+        "split log", "share status", "vpn log", "watch log",
     ];
-    PASSWORD
-        .iter()
-        .chain(BIG.iter())
+    BIG.iter()
         .any(|name| line == *name || line.starts_with(&format!("{name} ")))
+}
+
+/// Спросить пароль, отдав терминал на эти несколько секунд. Возвращаемся сразу
+/// после ввода — клавишу «чтобы вернуться» тут жать не за чем.
+fn ask_password(line: &str) -> Result<(), String> {
+    terminal::disable_raw_mode().ok();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        event::DisableMouseCapture,
+        terminal::LeaveAlternateScreen
+    );
+    print!("\x1b[2J\x1b[H");
+    println!("{DIM}  net {line} — нужны права администратора{RESET}\n");
+    std::io::stdout().flush().ok();
+
+    let asked = crate::sudoer::ask();
+
+    terminal::enable_raw_mode().ok();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        terminal::EnterAlternateScreen,
+        event::EnableMouseCapture
+    );
+    print!("\x1b[2J");
+    asked
 }
 
 /// Отдать терминал команде: выйти из сырого режима, дать ей напечатать своё и
@@ -416,7 +474,11 @@ fn hand_over(line: &str) -> (bool, String) {
     };
     let args: Vec<&str> = line.split_whitespace().collect();
     terminal::disable_raw_mode().ok();
-    let _ = crossterm::execute!(std::io::stdout(), terminal::LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        event::DisableMouseCapture,
+        terminal::LeaveAlternateScreen
+    );
     print!("\x1b[2J\x1b[H");
     println!("{DIM}  net {line}{RESET}\n");
     std::io::stdout().flush().ok();
@@ -427,7 +489,11 @@ fn hand_over(line: &str) -> (bool, String) {
     std::io::stdout().flush().ok();
     terminal::enable_raw_mode().ok();
     let _ = event::read();
-    let _ = crossterm::execute!(std::io::stdout(), terminal::EnterAlternateScreen);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        terminal::EnterAlternateScreen,
+        event::EnableMouseCapture
+    );
     print!("\x1b[2J");
 
     match status {
@@ -558,7 +624,15 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     // Список нод занимает всё, что осталось от окна: показывать семь строк из
     // двадцати двух — значит прятать половину подписки без причины.
     let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
-    let fixed = rows.len() + OUTPUT_ROWS + 9;
+    // Пустая панель вывода занимала восемь строк ни за чем, и на невысоком
+    // окне из-за неё было видно пять нод из двадцати двух. Пока выводить
+    // нечего, эти строки отдаём списку.
+    let output_rows = if screen.output.is_empty() {
+        0
+    } else {
+        OUTPUT_ROWS.min(screen.output.len())
+    };
+    let fixed = rows.len() + output_rows + 8;
     let room = height.saturating_sub(fixed).max(NODE_ROWS_MIN);
 
     if screen.nodes.is_empty() {
@@ -625,15 +699,18 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     }
     rows.push(String::new());
 
-    // Вывод команды — всегда одной высоты, чтобы ничего не прыгало.
-    let tail = screen.output.len().saturating_sub(OUTPUT_ROWS);
-    for row in 0..OUTPUT_ROWS {
+    // Показываем последние строки вывода: панель растёт до предела и дальше
+    // прокручивается сама.
+    let tail = screen.output.len().saturating_sub(output_rows);
+    for row in 0..output_rows {
         match screen.output.get(tail + row) {
             Some(line) => rows.push(format!("  {DIM}│{RESET} {line}")),
             None => rows.push(String::new()),
         }
     }
-    rows.push(String::new());
+    if output_rows > 0 {
+        rows.push(String::new());
+    }
 
     if !suggestions.is_empty() {
         for (row, item) in suggestions.iter().take(4).enumerate() {
