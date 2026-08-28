@@ -308,6 +308,7 @@ fn share_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             if probe::port_open(port, std::time::Duration::from_millis(400)) {
                 println!("{GREEN}Раздача работает{RESET}");
                 print_share_hint(port, share_password(cfg).as_deref());
+                print_share_clients(port);
             } else {
                 println!("{RED}Раздача выключена{RESET}  ({DIM}включить: net share on{RESET})");
             }
@@ -451,6 +452,18 @@ fn split_service(action: &str, port: u16) -> Result<(), String> {
     }
 }
 
+fn print_share_clients(port: u16) {
+    let peers = probe::connected_peers(port);
+    if peers.is_empty() {
+        println!("{DIM}Подключённых устройств нет.{RESET}");
+    } else {
+        println!("{GREEN}Подключено устройств: {}{RESET}", peers.len());
+        for peer in peers {
+            println!("  {peer}");
+        }
+    }
+}
+
 fn print_share_hint(port: u16, password: Option<&str>) {
     let ip = probe::lan_ip()
         .map(|ip| ip.to_string())
@@ -556,7 +569,12 @@ pub fn status_lines(cfg: &Config) -> Vec<(bool, String)> {
     let share_on = probe::port_open(cfg.share_port, Duration::from_millis(300));
     if share_on {
         let ip = probe::lan_ip().map(|i| i.to_string()).unwrap_or_default();
-        lines.push((true, format!("Раздача   ВКЛ    {ip}:{}", cfg.share_port)));
+        let clients = probe::connected_peers(cfg.share_port).len();
+        let tail = match clients {
+            0 => "устройств нет".to_string(),
+            n => format!("устройств: {n}"),
+        };
+        lines.push((true, format!("Раздача   ВКЛ    {ip}:{}  {tail}", cfg.share_port)));
     }
 
     let tg = Telegram::new(cfg);

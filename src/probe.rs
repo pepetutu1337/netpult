@@ -61,6 +61,37 @@ const NULL_DEVICE: &str = "NUL";
 #[cfg(not(windows))]
 const NULL_DEVICE: &str = "/dev/null";
 
+/// Адреса устройств, подключённых сейчас к нашему порту из локальной сети.
+///
+/// Читаем реальные соединения у системы (`ss`), а не свой счётчик: пульт и
+/// прокси — разные процессы, и общий счётчик потребовал бы канала между ними.
+/// Локальные подключения (127.0.0.1, ::1) не считаем — это мы сами, не телефон.
+pub fn connected_peers(port: u16) -> Vec<String> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let out = match Command::new("ss")
+        .args(["-Htn", "state", "established", &format!("sport = :{port}")])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    // С `-H` и фильтром по состоянию колонки: Recv-Q Send-Q Local Peer.
+    // Peer — четвёртое поле (индекс 3).
+    let mut peers: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(3)) // Peer Address:Port
+        .filter_map(|peer| peer.rsplit_once(':').map(|(addr, _)| addr))
+        .map(|addr| addr.trim_start_matches('[').trim_end_matches(']').to_string())
+        .filter(|addr| addr != "127.0.0.1" && addr != "::1" && !addr.is_empty())
+        .collect();
+    peers.sort();
+    peers.dedup();
+    peers
+}
+
 /// Слушает ли кто-то этот порт на этой машине.
 pub fn port_open(port: u16, timeout: Duration) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

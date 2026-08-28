@@ -47,7 +47,7 @@ netpult profile save   запомнить состояние для этой с�
 netpult profile apply  привести всё к профилю сети
 
 netpult share on|off   прокси для телефона: весь его трафик через этот компьютер
-netpult share status   адрес и порт для настроек Wi-Fi телефона
+netpult share status   адрес, порт, пароль и список подключённых устройств
 
 netpult split on|off   через ноду только домены из списка, остальное напрямую
 netpult split list     какие домены идут через ноду
