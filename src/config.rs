@@ -20,6 +20,8 @@ pub struct Config {
     pub tg_lan: bool,
     /// Приложение Happ.
     pub happ_bin: Option<PathBuf>,
+    /// Ядро sing-box: своё, вместо Happ. Ищется рядом с состоянием и в PATH.
+    pub core_bin: Option<PathBuf>,
     /// Как часто сторож проверяет связь, минуты.
     pub watch_interval_min: u32,
     /// Следить ли за zapret.
@@ -45,6 +47,7 @@ impl Default for Config {
             tg_port: 1080,
             tg_lan: true,
             happ_bin: None,
+            core_bin: None,
             watch_interval_min: 10,
             watch_zapret: true,
             watch_telegram: true,
@@ -132,6 +135,16 @@ fn detect_happ() -> Option<PathBuf> {
     first_existing(&candidates)
 }
 
+/// Ядро sing-box: сначала своё, положенное рядом с состоянием, потом системное.
+fn detect_core() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "sing-box.exe" } else { "sing-box" };
+    let mut candidates = vec![state_dir().join(name), home().join(".local/bin").join(name)];
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|p| p.join(name)));
+    }
+    first_existing(&candidates)
+}
+
 fn parse(text: &str) -> HashMap<String, String> {
     text.lines()
         .map(str::trim)
@@ -165,6 +178,9 @@ impl Config {
             if let Some(v) = map.get("happ_bin") {
                 cfg.happ_bin = Some(PathBuf::from(v));
             }
+            if let Some(v) = map.get("core_bin") {
+                cfg.core_bin = Some(PathBuf::from(v));
+            }
             if let Some(v) = map.get("watch_interval_min").and_then(|v| v.parse().ok()) {
                 cfg.watch_interval_min = v;
             }
@@ -196,6 +212,9 @@ impl Config {
         }
         if cfg.happ_bin.is_none() {
             cfg.happ_bin = detect_happ();
+        }
+        if cfg.core_bin.is_none() {
+            cfg.core_bin = detect_core();
         }
         cfg
     }

@@ -930,6 +930,13 @@ pub fn save(url: &str, nodes: &[Node], config: &str) -> Result<std::path::PathBu
     Ok(path)
 }
 
+/// Ссылка подписки, сохранённая при разборе: по ней подписка обновляется.
+pub fn saved_url() -> Result<String, String> {
+    std::fs::read_to_string(subscription_path())
+        .map(|s| s.trim().to_string())
+        .map_err(|_| "подписка ещё не загружена — net vpn sub <ссылка>".to_string())
+}
+
 /// Ноды из сохранённого списка. Полный разбор конфига для меню не нужен —
 /// движку он нужен целиком, а человеку только имена.
 pub fn load_nodes() -> Result<Vec<SavedNode>, String> {

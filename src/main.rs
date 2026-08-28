@@ -95,9 +95,27 @@ fn quiet_broken_pipe() {
 /// `net vpn` — управление туннелем: клиент Happ там, где он есть, и своё ядро
 /// sing-box там, где Happ не встаёт (macOS 11, например).
 fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    let core = singbox::Core::new(cfg);
+    // Своё ядро главнее клиента: если подписка разобрана, туннель поднимает
+    // netpult сам. Happ остаётся запасным путём, пока подписки нет.
+    let own_core = sub::config_path().exists() && cfg.core_bin.is_some();
     match rest.first().copied() {
-        None | Some("on") | Some("open") => Vpn::new(cfg).open(),
-        Some("off") => Vpn::new(cfg).close(),
+        None | Some("on") | Some("open") => {
+            if own_core {
+                core.start()?;
+                print_core_status();
+                Ok(())
+            } else {
+                Vpn::new(cfg).open()
+            }
+        }
+        Some("off") => {
+            if own_core && core.state() == singbox::State::Up {
+                core.stop()
+            } else {
+                Vpn::new(cfg).close()
+            }
+        }
         Some("sub") | Some("subscription") => {
             let url = rest
                 .get(1)
@@ -105,15 +123,111 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 .ok_or("нужна ссылка: net vpn sub <ссылка на подписку>")?;
             vpn_subscribe(url)
         }
-        Some("nodes") => {
-            let nodes = sub::load_nodes()?;
-            for (i, node) in nodes.iter().enumerate() {
-                println!("{:>3}. {}", i + 1, node.name);
+        Some("update") => {
+            let url = sub::saved_url()?;
+            vpn_subscribe(&url)
+        }
+        Some("core") => match rest.get(1).copied() {
+            Some("install") | None => {
+                println!("Качаю ядро...");
+                let path = singbox::install_core()?;
+                println!("{GREEN}Ядро: {}{RESET}", path.display());
+                Ok(())
             }
-            println!("\nвсего нод: {}", nodes.len());
+            Some(other) => Err(format!("net vpn core install, а не «{other}»")),
+        },
+        Some("nodes") | Some("list") => vpn_nodes(cfg),
+        Some("use") | Some("select") => {
+            let want = rest[1..].join(" ");
+            if want.trim().is_empty() {
+                return Err("нужен номер или имя: net vpn use <номер|имя>".into());
+            }
+            vpn_use(&want)
+        }
+        Some("auto") => {
+            singbox::select(singbox::AUTO)?;
+            println!("{GREEN}Нода выбирается автоматически по задержке{RESET}");
             Ok(())
         }
-        Some(other) => Err(format!("net vpn on|off|sub|nodes, а не «{other}»")),
+        Some("log") => {
+            let path = config::state_dir().join("core.log");
+            let text = std::fs::read_to_string(&path)
+                .map_err(|_| format!("журнала ещё нет: {}", path.display()))?;
+            for line in text.lines().rev().take(30).collect::<Vec<_>>().iter().rev() {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "net vpn on|off|sub|update|nodes|use|auto|core|log, а не «{other}»"
+        )),
+    }
+}
+
+/// Список нод с задержками. Пока ядро не поднято, задержку взять неоткуда —
+/// показываем хотя бы имена, чтобы было видно, что подписка на месте.
+fn vpn_nodes(cfg: &Config) -> Result<(), String> {
+    let names: Vec<String> = sub::load_nodes()?.into_iter().map(|n| n.name).collect();
+    if singbox::Core::new(cfg).state() != singbox::State::Up {
+        for (i, name) in names.iter().enumerate() {
+            println!("{:>3}. {name}", i + 1);
+        }
+        println!("\nвсего нод: {}. Задержки появятся, когда туннель поднят.", names.len());
+        return Ok(());
+    }
+    let current = singbox::current_node();
+    println!("Меряю задержки...");
+    for (i, name) in names.iter().enumerate() {
+        let mark = if current.as_deref() == Some(name.as_str()) {
+            "●"
+        } else {
+            " "
+        };
+        match singbox::delay(name, 3000) {
+            Some(ms) => {
+                let color = if ms < 300 {
+                    GREEN
+                } else if ms < 800 {
+                    YELLOW
+                } else {
+                    RED
+                };
+                println!("{:>3}. {mark} {name} — {color}{ms} мс{RESET}", i + 1);
+            }
+            None => println!("{:>3}. {mark} {name} — {RED}не отвечает{RESET}", i + 1),
+        }
+    }
+    if let Some(now) = current {
+        println!("\nсейчас: {now}");
+    }
+    Ok(())
+}
+
+/// Выбор ноды номером из списка или частью имени — набирать флаги стран руками
+/// невозможно.
+fn vpn_use(want: &str) -> Result<(), String> {
+    let names: Vec<String> = sub::load_nodes()?.into_iter().map(|n| n.name).collect();
+    let found = match want.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= names.len() => names[n - 1].clone(),
+        Ok(n) => return Err(format!("ноды №{n} нет, всего {}", names.len())),
+        Err(_) => {
+            let needle = want.to_lowercase();
+            names
+                .iter()
+                .find(|n| n.to_lowercase().contains(&needle))
+                .cloned()
+                .ok_or_else(|| format!("ноды с «{want}» в имени нет"))?
+        }
+    };
+    singbox::select(&found)?;
+    println!("{GREEN}Нода: {found}{RESET}");
+    Ok(())
+}
+
+fn print_core_status() {
+    match singbox::current_node() {
+        Some(now) => println!("{GREEN}Туннель поднят{RESET} — нода: {now}"),
+        None => println!("{GREEN}Туннель поднят{RESET}"),
     }
 }
 
@@ -851,7 +965,12 @@ fn print_help() {
   net vpn              открыть окно клиента
   net vpn off          закрыть
   net vpn sub <ссыл>   разобрать подписку и собрать конфиг своего ядра
-  net vpn nodes        ноды из подписки
+  net vpn update       перечитать подписку
+  net vpn nodes        ноды с задержками
+  net vpn use <ном>    выбрать ноду (номером или частью имени)
+  net vpn auto         выбирать самую быструю самому
+  net vpn core install поставить ядро sing-box
+  net vpn log          журнал ядра
 
 {BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
   net tg on | off      включить / выключить
