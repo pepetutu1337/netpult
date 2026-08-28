@@ -26,6 +26,8 @@ const NODE_ROWS_MIN: usize = 5;
 
 /// Весточка из рабочего потока.
 enum Work {
+    /// Команда пошла: её номер процесса, чтобы было чем оборвать.
+    Started(u32),
     /// Строка вывода запущенной команды.
     Line(String),
     /// Задержка ноды: номер и результат замера.
@@ -56,6 +58,8 @@ struct Screen {
     busy_since: Instant,
     /// Последняя запущенная команда — чтобы повторить её после пароля.
     last: Option<String>,
+    /// Процесс идущей команды: по нему её и обрываем.
+    running: Option<u32>,
 }
 
 pub fn run(cfg: &Config) -> Result<(), String> {
@@ -73,6 +77,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         busy: None,
         busy_since: Instant::now(),
         last: None,
+        running: None,
     };
     let commands = crate::commands();
     let items: Vec<crate::picker::Item> = commands
@@ -102,6 +107,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         // Сначала забираем всё, что успели прислать рабочие потоки.
         while let Ok(work) = receiver.try_recv() {
             match work {
+                Work::Started(pid) => screen.running = Some(pid),
                 Work::Line(line) => screen.output.push(line),
                 Work::Delay(index, ms) => {
                     if let Some(node) = screen.nodes.get_mut(index) {
@@ -110,6 +116,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                 }
                 Work::Done(ok, text) => {
                     screen.busy = None;
+                    screen.running = None;
                     // Пароль спрашиваем не заранее, а по надобности: там, где
                     // хватает polkit, лишний запрос только раздражает.
                     if !ok && text.contains(crate::sudoer::NEED_PASSWORD) {
@@ -178,6 +185,12 @@ pub fn run(cfg: &Config) -> Result<(), String> {
             continue;
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            // Пока команда идёт, Ctrl+C обрывает её, а не пульт: выйти,
+            // оставив за собой недоделанное дело, — не то, чего ждут.
+            if screen.busy.is_some() {
+                stop_running(&mut screen);
+                continue;
+            }
             break Ok(());
         }
 
@@ -354,6 +367,15 @@ fn start_ping(screen: &mut Screen, sender: Sender<Work>) {
 /// перехватывается построчно, экран остаётся живым, а печать команд не нужно
 /// переписывать ради интерактивности.
 fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
+    // Службы из экрана не запускают: они не заканчиваются, и пульт остался бы
+    // «занят» навсегда.
+    if is_daemon(line) {
+        screen.message = Some((
+            false,
+            "это служба, она работает без конца — ставится отдельно: net watch install".into(),
+        ));
+        return;
+    }
     // Вывод, который не лезет в панель на восемь строк, показываем во весь
     // терминал: калечить QR-код рамкой незачем.
     if needs_terminal(line) {
@@ -397,6 +419,7 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
                 return;
             }
         };
+        let _ = sender.send(Work::Started(child.id()));
         if let Some(out) = child.stdout.take() {
             for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
                 let clean = strip_colors(&line);
@@ -427,6 +450,31 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
             },
         ));
     });
+}
+
+/// Команда, которая не заканчивается сама.
+fn is_daemon(line: &str) -> bool {
+    matches!(line.trim(), "watch" | "split serve" | "share serve")
+}
+
+/// Оборвать идущую команду.
+fn stop_running(screen: &mut Screen) {
+    if let Some(pid) = screen.running.take() {
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
+        }
+    }
+    screen.busy = None;
+    screen.message = Some((false, "оборвано".into()));
 }
 
 /// Нужен ли команде весь экран: её вывод не лезет в панель на восемь строк.

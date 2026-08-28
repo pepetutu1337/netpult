@@ -839,40 +839,85 @@ fn print_split_hint(cfg: &Config) {
     println!("Сплит-прокси: {BOLD}127.0.0.1:{}{RESET}", cfg.split_port);
     println!("{DIM}Домены из списка идут через ноду {}, остальное напрямую.{RESET}", cfg.split_upstream);
     println!("{DIM}Список: net split list.  Прописать прокси в системе — тогда весь браузер разделится сам.{RESET}");
-    if !socks::reachable(&cfg.split_upstream, std::time::Duration::from_secs(2)) {
-        println!("{YELLOW}Сейчас нода-SOCKS не отвечает: подними Happ в режиме прокси (не TUN).{RESET}");
+    // Сплит писался под времена, когда ноду держал Happ в режиме прокси. Своё
+    // ядро делит трафик само, по правилам маршрутизации, и второй делитель
+    // поверх него — лишний слой.
+    if singbox::Core::new(cfg).state() == singbox::State::Up {
+        println!("{YELLOW}Свой туннель уже поднят и делит трафик сам — сплит поверх него не нужен.{RESET}");
+    } else if !socks::reachable(&cfg.split_upstream, std::time::Duration::from_secs(2)) {
+        println!("{YELLOW}Сейчас нода-SOCKS не отвечает: подними Happ в режиме прокси (не TUN) или свой туннель — net vpn on.{RESET}");
     }
 }
 
-fn split_service(action: &str, port: u16) -> Result<(), String> {
+/// Своя служба пользователя: сплит и раздача устроены одинаково — файл юнита,
+/// перезагрузка, включение с запуском. Отличаются только именем и командой.
+///
+/// Systemd на включении печатает про созданный симлинк, а на выключении — про
+/// удалённый; человеку это ничего не говорит, поэтому его вывод забираем себе.
+/// И главное: `enable --now` возвращается раньше, чем служба успевает занять
+/// порт, поэтому дожидаемся порта — иначе следующая же команда честно скажет
+/// «выключено» о том, что секунду назад включили.
+fn user_service(action: &str, name: &str, description: &str, command: &str, port: u16) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err(format!(
-            "служба сплита на {} ещё не подведена — запусти «netpult split serve» вручную",
+            "служба на {} ещё не подведена — запусти «netpult {command}» вручную",
             std::env::consts::OS
         ));
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = config::home().join(".config/systemd/user");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let unit = dir.join("netpult-split.service");
+    let unit = dir.join(format!("{name}.service"));
     if action == "on" {
         let body = format!(
-            "[Unit]\nDescription=netpult — сплит-прокси (порт {port})\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} split serve\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription={description} (порт {port})\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} {command}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
             exe.display()
         );
         std::fs::write(&unit, body).map_err(|e| e.to_string())?;
     }
-    let systemctl = |args: &[&str]| -> Result<(), String> {
-        let status = std::process::Command::new("systemctl").args(args).status()
+
+    let run = |args: &[&str]| -> Result<(), String> {
+        let out = std::process::Command::new("systemctl")
+            .args(args)
+            .output()
             .map_err(|e| format!("не запустился systemctl: {e}"))?;
-        if status.success() { Ok(()) } else { Err(format!("systemctl {} не сработал", args.join(" "))) }
+        if out.status.success() {
+            return Ok(());
+        }
+        let trouble = String::from_utf8_lossy(&out.stderr);
+        Err(format!(
+            "systemctl {}: {}",
+            args.join(" "),
+            trouble.trim().lines().next().unwrap_or("не сработало")
+        ))
     };
-    systemctl(&["--user", "daemon-reload"])?;
-    if action == "on" {
-        systemctl(&["--user", "enable", "--now", "netpult-split.service"])
-    } else {
-        systemctl(&["--user", "disable", "--now", "netpult-split.service"])
+    run(&["--user", "daemon-reload"])?;
+    let service = format!("{name}.service");
+    if action != "on" {
+        return run(&["--user", "disable", "--now", &service]);
     }
+    run(&["--user", "enable", "--now", &service])?;
+
+    let waiting = std::time::Instant::now();
+    while waiting.elapsed() < Duration::from_secs(5) {
+        if probe::port_open(port, Duration::from_millis(200)) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    Err(format!(
+        "служба запущена, но порт {port} так и не занят — смотри: journalctl --user -u {service} -n 20"
+    ))
+}
+
+fn split_service(action: &str, port: u16) -> Result<(), String> {
+    user_service(
+        action,
+        "netpult-split",
+        "netpult — сплит-прокси",
+        "split serve",
+        port,
+    )
 }
 
 fn print_share_clients(port: u16) {
@@ -906,38 +951,13 @@ fn print_share_hint(port: u16, password: Option<&str>) {
 }
 
 pub fn share_service_public(action: &str, port: u16) -> Result<(), String> {
-    if !cfg!(target_os = "linux") {
-        return Err(format!(
-            "служба раздачи на {} ещё не подведена — запусти «netpult share serve» вручную",
-            std::env::consts::OS
-        ));
-    }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = config::home().join(".config/systemd/user");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let unit = dir.join("netpult-share.service");
-
-    if action == "on" {
-        let body = format!(
-            "[Unit]\nDescription=netpult — раздача обхода на телефон (порт {port})\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} share serve\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n",
-            exe.display()
-        );
-        std::fs::write(&unit, body).map_err(|e| e.to_string())?;
-    }
-
-    let systemctl = |args: &[&str]| -> Result<(), String> {
-        let status = std::process::Command::new("systemctl")
-            .args(args)
-            .status()
-            .map_err(|e| format!("не запустился systemctl: {e}"))?;
-        if status.success() { Ok(()) } else { Err(format!("systemctl {} не сработал", args.join(" "))) }
-    };
-    systemctl(&["--user", "daemon-reload"])?;
-    if action == "on" {
-        systemctl(&["--user", "enable", "--now", "netpult-share.service"])
-    } else {
-        systemctl(&["--user", "disable", "--now", "netpult-share.service"])
-    }
+    user_service(
+        action,
+        "netpult-share",
+        "netpult — раздача обхода на телефон",
+        "share serve",
+        port,
+    )
 }
 
 fn show_qr(cfg: &Config) -> Result<(), String> {
