@@ -27,8 +27,13 @@ pub struct DomainList {
 }
 
 impl DomainList {
-    pub fn load(path: &std::path::Path) -> DomainList {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+    /// Грузит несколько файлов в один список (ручной + автосписок геоблока).
+    pub fn load_all(paths: &[std::path::PathBuf]) -> DomainList {
+        let text = paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
         DomainList::parse(&text)
     }
 
@@ -51,8 +56,99 @@ impl DomainList {
     }
 }
 
+/// Ручной список — правит человек, автообновление его не трогает.
 pub fn list_path() -> std::path::PathBuf {
     state_dir().join("split-domains.list")
+}
+
+pub fn log_path() -> std::path::PathBuf {
+    state_dir().join("split.log")
+}
+
+/// Пишет решение маршрутизации в лог, чтобы потом видеть, что шло через ноду,
+/// а что напрямую. Лог сам себя подрезает, чтобы не разрастаться без предела.
+fn log_decision(host: &str, via_node: bool) {
+    use std::io::Write;
+    let mark = if via_node { "нода  " } else { "прямо " };
+    let stamp = std::process::Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let path = log_path();
+
+    // Раз в сотню запросов подрезаем хвост, оставляя последние ~500 строк.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 200_000 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let tail: Vec<&str> = text.lines().rev().take(500).collect();
+                let trimmed: String =
+                    tail.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n";
+                std::fs::write(&path, trimmed).ok();
+            }
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        writeln!(f, "{stamp}  {mark}  {host}").ok();
+    }
+}
+
+/// Автосписок геоблока — перезаписывается `net split update`.
+pub fn geoblock_path() -> std::path::PathBuf {
+    state_dir().join("split-geoblock.list")
+}
+
+/// Оба списка, которые читает прокси.
+pub fn all_list_paths() -> Vec<std::path::PathBuf> {
+    vec![list_path(), geoblock_path()]
+}
+
+/// Источники автосписка ушедших из РФ сервисов (itdoginfo/allow-domains).
+///
+/// Первым — зеркало jsDelivr: сам GitHub raw в РФ обычно недоступен без обхода,
+/// а CDN проходит. Дальше — запасные на случай, если зеркало приляжет.
+pub const GEOBLOCK_URLS: &[&str] = &[
+    "https://cdn.jsdelivr.net/gh/itdoginfo/allow-domains@main/Categories/geoblock.lst",
+    "https://fastly.jsdelivr.net/gh/itdoginfo/allow-domains@main/Categories/geoblock.lst",
+    "https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Categories/geoblock.lst",
+];
+
+/// Тянет автосписок геоблока и сохраняет его. Возвращает число доменов.
+pub fn update_geoblock() -> Result<usize, String> {
+    let mut body = String::new();
+    for url in GEOBLOCK_URLS {
+        if let Ok(out) = std::process::Command::new("curl")
+            .args(["-fsSL", "--max-time", "30", url])
+            .output()
+        {
+            if out.status.success() && out.stdout.len() > 1000 {
+                body = String::from_utf8_lossy(&out.stdout).into_owned();
+                break;
+            }
+        }
+    }
+    if body.is_empty() {
+        return Err("не скачался список геоблока (все зеркала молчат)".into());
+    }
+    let domains: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && l.contains('.'))
+        .collect();
+
+    // Защита от битой загрузки: пустой/куцый ответ не затирает рабочий список.
+    if domains.len() < 100 {
+        return Err(format!("подозрительно короткий список ({}), не сохраняю", domains.len()));
+    }
+
+    std::fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
+    let header = "# Автосписок геоблока (itdoginfo/allow-domains). Не править руками —\n\
+                  # перезаписывается командой net split update. Свои домены — в\n\
+                  # split-domains.list.\n";
+    let text = format!("{header}{}\n", domains.join("\n"));
+    std::fs::write(geoblock_path(), text).map_err(|e| e.to_string())?;
+    Ok(domains.len())
 }
 
 /// Домены по умолчанию: то, что режут по стране, а не по DPI.
@@ -83,7 +179,7 @@ pub fn ensure_default_list() -> std::io::Result<std::path::PathBuf> {
 pub fn serve(cfg: &Config) -> Result<(), String> {
     let port = cfg.split_port;
     let upstream = cfg.split_upstream.clone();
-    let list = std::sync::Arc::new(DomainList::load(&list_path()));
+    let list = std::sync::Arc::new(DomainList::load_all(&all_list_paths()));
 
     if !socks::reachable(&upstream, Duration::from_secs(2)) {
         eprintln!(
@@ -145,6 +241,7 @@ fn handle(mut client: TcpStream, upstream: &str, list: &DomainList) -> std::io::
     };
 
     let via_node = list.matches(&host);
+    log_decision(&host, via_node);
     let upstream_stream = if via_node {
         socks::connect(upstream, &host, port, UPSTREAM_TIMEOUT).map_err(|e| {
             std::io::Error::other(format!("нода {upstream} не соединила с {host}: {e}"))

@@ -498,3 +498,102 @@ pub fn render(grid: &[Vec<bool>], quiet: usize) -> String {
     }
     out
 }
+
+// ── PNG без внешних библиотек ────────────────────────────────────────────
+//
+// Пишем чёрно-белый PNG вручную: сам формат простой, а тянуть ради него крейт
+// с деком-прессией незачем. Данные упаковываем в zlib «как есть» (несжатые
+// блоки) — QR маленький, размер файла всё равно копеечный.
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut crc_input = Vec::with_capacity(4 + data.len());
+    crc_input.extend_from_slice(kind);
+    crc_input.extend_from_slice(data);
+    out.extend_from_slice(&crc_input);
+    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+}
+
+/// Кодирует матрицу QR в PNG: тёмный модуль — чёрный, светлый — белый.
+/// `scale` — сколько пикселей на модуль, `quiet` — поля в модулях.
+pub fn to_png(grid: &[Vec<bool>], scale: usize, quiet: usize) -> Vec<u8> {
+    let modules = grid.len() + quiet * 2;
+    let side = modules * scale;
+
+    // Сырьё: по строке на пиксель, каждая начинается с байта фильтра 0.
+    let mut raw = Vec::with_capacity((side + 1) * side);
+    for py in 0..side {
+        raw.push(0);
+        let my = py / scale;
+        for px in 0..side {
+            let mx = px / scale;
+            let dark = my >= quiet
+                && my < quiet + grid.len()
+                && mx >= quiet
+                && mx < quiet + grid.len()
+                && grid[my - quiet][mx - quiet];
+            raw.push(if dark { 0x00 } else { 0xFF });
+        }
+    }
+
+    // zlib: заголовок + несжатые блоки (тип 00) + adler32.
+    let mut zlib = vec![0x78, 0x01];
+    let mut offset = 0;
+    while offset < raw.len() {
+        let block = std::cmp::min(65535, raw.len() - offset);
+        let last = if offset + block >= raw.len() { 1 } else { 0 };
+        zlib.push(last);
+        zlib.extend_from_slice(&(block as u16).to_le_bytes());
+        zlib.extend_from_slice(&(!(block as u16)).to_le_bytes());
+        zlib.extend_from_slice(&raw[offset..offset + block]);
+        offset += block;
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&(side as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(side as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]); // 8 бит, greyscale
+    png_chunk(&mut png, b"IHDR", &ihdr);
+    png_chunk(&mut png, b"IDAT", &zlib);
+    png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+#[cfg(test)]
+mod png_tests {
+    use super::*;
+
+    #[test]
+    fn png_has_valid_signature_and_size() {
+        let grid = encode("test").unwrap();
+        let png = to_png(&grid, 4, 4);
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        // IHDR ширина = (модули + поля*2) * scale
+        let side = ((grid.len() + 8) * 4) as u32;
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        assert_eq!(w, side);
+    }
+}

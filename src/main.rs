@@ -51,7 +51,7 @@ fn main() {
             Some("off") => Vpn::new(&cfg).close(),
             Some(other) => Err(format!("net vpn on|off, а не «{other}»")),
         },
-        "tg" | "telegram" => telegram_command(&cfg, rest.first().copied()),
+        "tg" | "telegram" => telegram_command(&cfg, &rest),
         "test" => {
             run_test_public(&cfg);
             Ok(())
@@ -61,7 +61,7 @@ fn main() {
         "share" => share_command(&cfg, &rest),
         "split" => split_command(&cfg, &rest),
         "watch" => watch_command(&cfg, &rest),
-        "qr" => show_qr(&cfg),
+        "qr" => show_qr_maybe_png(&cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
         "help" | "-h" | "--help" => {
             print_help();
@@ -128,7 +128,9 @@ fn strategy(cfg: &Config, want: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn telegram_command(cfg: &Config, action: Option<&str>) -> Result<(), String> {
+fn telegram_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    let action = rest.first().copied();
+    let extra = rest.get(1..).unwrap_or(&[]);
     let tg = Telegram::new(cfg);
     match action {
         None | Some("show") | Some("link") => {
@@ -154,7 +156,7 @@ fn telegram_command(cfg: &Config, action: Option<&str>) -> Result<(), String> {
             println!("{RED}Прокси Telegram выключен{RESET}");
             Ok(())
         }
-        Some("qr") => show_qr(cfg),
+        Some("qr") => show_qr_maybe_png(cfg, extra),
         Some("newsecret") => {
             // Сменить секрет прокси — только по этой команде. Секрет постоянный:
             // сам не крутится при перезапусках, чтобы настроенный Telegram не
@@ -418,12 +420,60 @@ fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some("list") => {
-            let path = split::ensure_default_list().map_err(|e| e.to_string())?;
-            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            for line in text.lines().filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') }) {
-                println!("  {line}");
+            split::ensure_default_list().map_err(|e| e.to_string())?;
+            let mut count = 0;
+            for path in split::all_list_paths() {
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let domains: Vec<&str> = text
+                    .lines()
+                    .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') })
+                    .collect();
+                if domains.is_empty() {
+                    continue;
+                }
+                let label = if path == split::geoblock_path() {
+                    "автосписок геоблока"
+                } else {
+                    "свой список"
+                };
+                println!("{DIM}— {label} ({}) —{RESET}", domains.len());
+                for d in &domains {
+                    println!("  {d}");
+                }
+                count += domains.len();
             }
-            println!("{DIM}Файл: {}{RESET}", path.display());
+            if count == 0 {
+                println!("{DIM}Список пуст.{RESET}");
+            }
+            Ok(())
+        }
+        Some("log") => {
+            let text = std::fs::read_to_string(split::log_path())
+                .map_err(|_| "лог сплита пуст — пока ничего не проходило".to_string())?;
+            let lines: Vec<&str> = text.lines().collect();
+            let show = lines.len().saturating_sub(40);
+            for line in &lines[show..] {
+                if line.contains("нода") {
+                    println!("{GREEN}{line}{RESET}");
+                } else {
+                    println!("{DIM}{line}{RESET}");
+                }
+            }
+            let via = lines.iter().filter(|l| l.contains("нода")).count();
+            println!(
+                "{DIM}всего записей {}, из них через ноду {via}{RESET}",
+                lines.len()
+            );
+            Ok(())
+        }
+        Some("update") => {
+            println!("Тяну автосписок геоблока…");
+            let n = split::update_geoblock()?;
+            println!("{GREEN}Геоблок обновлён: {n} доменов{RESET}");
+            if probe::port_open(cfg.split_port, std::time::Duration::from_millis(400)) {
+                split_service("on", cfg.split_port).ok(); // перечитать список
+                println!("{DIM}Сплит перезапущен с новым списком.{RESET}");
+            }
             Ok(())
         }
         Some("add") => {
@@ -456,7 +506,7 @@ fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!("net split [on|off|status|list|add], а не «{other}»")),
+        Some(other) => Err(format!("net split [on|off|status|list|add|update], а не «{other}»")),
     }
 }
 
@@ -566,16 +616,40 @@ pub fn share_service_public(action: &str, port: u16) -> Result<(), String> {
 }
 
 fn show_qr(cfg: &Config) -> Result<(), String> {
+    show_qr_maybe_png(cfg, &[])
+}
+
+/// QR прокси Telegram: в терминал, а с `--png [путь]` — ещё и картинкой в файл.
+fn show_qr_maybe_png(cfg: &Config, extra: &[&str]) -> Result<(), String> {
     let tg = Telegram::new(cfg);
     let link = tg
         .lan_link()
         .ok_or("нет ссылки: прокси ещё не запускался или не видно локальной сети")?;
     let grid = qr::encode(&link)?;
+
+    if let Some(pos) = extra.iter().position(|a| *a == "--png") {
+        let path = extra
+            .get(pos + 1)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| {
+                config::home()
+                    .join("telegram-proxy-qr.png")
+                    .display()
+                    .to_string()
+            });
+        let png = qr::to_png(&grid, 8, 4);
+        std::fs::write(&path, png).map_err(|e| format!("не записать {path}: {e}"))?;
+        println!("{GREEN}QR сохранён: {path}{RESET}");
+        println!("  {link}");
+        return Ok(());
+    }
+
     println!();
     print!("{}", qr::render(&grid, 2));
     println!("  {link}\n");
     println!("{DIM}Телефон: камера на QR, откроется Telegram, подтвердить прокси.{RESET}");
     println!("{DIM}Нужна одна сеть Wi-Fi с этим компьютером, и он должен не спать.{RESET}");
+    println!("{DIM}Сохранить картинкой: net tg qr --png{RESET}");
     Ok(())
 }
 
@@ -725,8 +799,10 @@ fn print_help() {
 
 {BOLD}сплит{RESET} — через ноду только нужные домены, остальное напрямую
   net split on|off     включить / выключить сплит-прокси
-  net split list       какие домены идут через ноду
-  net split add <дом>  добавить домен в список
+  net split list       какие домены идут через ноду (свой список + автосписок)
+  net split add <дом>  добавить домен в свой список
+  net split update     обновить автосписок геоблока (itdoginfo, ~466 доменов)
+  net split log        что шло через ноду, а что напрямую
 
 {BOLD}VPN{RESET} — для геоблока, когда сервис режет по стране
   net vpn              открыть окно клиента
@@ -734,7 +810,7 @@ fn print_help() {
 
 {BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
   net tg on | off      включить / выключить
-  net tg qr            QR для телефона
+  net tg qr            QR для телефона (net tg qr --png [файл] — сохранить картинкой)
   net tg link          ссылки для компьютера и телефона
   net tg newsecret     сменить секрет прокси (QR на телефоне придётся пересканировать)"
     );

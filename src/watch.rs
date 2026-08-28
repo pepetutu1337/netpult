@@ -11,6 +11,7 @@
 use crate::config::{state_dir, Config};
 use crate::probe;
 use crate::profile;
+use crate::split;
 use crate::telegram::Telegram;
 use crate::tune;
 use crate::zapret::{State, Zapret};
@@ -86,6 +87,23 @@ pub fn note(text: &str) {
     }
 }
 
+/// Показывает всплывающее уведомление на рабочем столе, если есть чем.
+/// Тихо ничего не делает там, где `notify-send` недоступен (сервер, Windows).
+pub fn notify(text: &str) {
+    if cfg!(target_os = "linux") {
+        std::process::Command::new("notify-send")
+            .args(["-a", "Обход блокировок", "netpult", text])
+            .status()
+            .ok();
+    }
+}
+
+/// Запись в журнал + уведомление: для событий, о которых стоит знать сразу.
+fn alert(text: &str) {
+    note(text);
+    notify(text);
+}
+
 fn everything_reachable() -> bool {
     TARGETS
         .iter()
@@ -112,21 +130,24 @@ fn follow_network(cfg: &Config) -> bool {
     if before.trim().is_empty() {
         return false; // Первый запуск: просто запомнили, где мы.
     }
-    note(&format!("сеть сменилась: {} → {now}", before.trim()));
     match profile::apply(cfg) {
-        Ok(done) if done.is_empty() => false,
+        Ok(done) if done.is_empty() => {
+            note(&format!("сеть сменилась: {} → {now}", before.trim()));
+            false
+        }
         Ok(done) => {
-            note(&format!("профиль сети: {}", done.join(", ")));
+            alert(&format!("сеть «{now}»: {}", done.join(", ")));
             true
         }
         Err(e) => {
-            note(&format!("профиль не применён: {e}"));
+            note(&format!("сеть «{now}», профиль не применён: {e}"));
             false
         }
     }
 }
 
 pub fn tick(cfg: &Config) -> bool {
+    maybe_update_geoblock();
     let mut acted = follow_network(cfg);
     let z = Zapret::new(cfg);
     let tg = Telegram::new(cfg);
@@ -179,15 +200,35 @@ pub fn tick(cfg: &Config) -> bool {
     // 4. Дело в стратегии.
     note("не помогло — подбираю стратегию");
     match tune::run(cfg, &tune::Options { full: false, verbose: false }) {
-        Ok(best) => note(&format!(
-            "поставил {} ({}, {:.0} КБ/с)",
+        Ok(best) => alert(&format!(
+            "стратегия сменена на {} ({}, {:.0} КБ/с)",
             best.strategy,
             if best.reachable { "открывается" } else { "всё ещё нет" },
             best.speed
         )),
-        Err(e) => note(&format!("подбор не удался: {e}")),
+        Err(e) => alert(&format!("обход упал, подбор не удался: {e}")),
     }
     true
+}
+
+/// Раз в сутки обновляет автосписок геоблока (если сплит вообще используется).
+fn maybe_update_geoblock() {
+    let marker = state_dir().join("geoblock.updated");
+    let day = 24 * 60 * 60;
+    let fresh = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e.as_secs() < day).unwrap_or(false))
+        .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    match split::update_geoblock() {
+        Ok(n) => {
+            note(&format!("автосписок геоблока обновлён: {n} доменов"));
+            std::fs::write(&marker, "").ok();
+        }
+        Err(e) => note(&format!("автосписок геоблока не обновился: {e}")),
+    }
 }
 
 /// Бесконечный цикл проверок.
