@@ -1,0 +1,130 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза (например v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Черновик релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 && exit 0
+          gh release create "$TAG" --title "netpult $TAG" --generate-notes --draft
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            name: macos-universal
+            target: universal-apple-darwin
+          - os: windows-latest
+            name: windows-x86_64
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      # musl даёт статический бинарь: одна сборка идёт и на Ubuntu, и на
+      # SteamOS, и на Alpine — без привязки к версии glibc машины сборки.
+      - name: Тулчейн Linux
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Тулчейн macOS
+        if: matrix.name == 'macos-universal'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Сборка
+        shell: bash
+        # MACOSX_DEPLOYMENT_TARGET=11.0 — минимальная поддерживаемая система.
+        # Без него линкер ставит minos по версии SDK раннера, и на Big Sur
+        # бинарь просто не запускается.
+        run: |
+          set -eux
+          case "${{ matrix.name }}" in
+            macos-universal)
+              export MACOSX_DEPLOYMENT_TARGET=11.0
+              cargo build --release --locked --target x86_64-apple-darwin
+              cargo build --release --locked --target aarch64-apple-darwin
+              mkdir -p dist
+              lipo -create -output dist/netpult \
+                target/x86_64-apple-darwin/release/netpult \
+                target/aarch64-apple-darwin/release/netpult
+              codesign --force --sign - dist/netpult
+              lipo -info dist/netpult
+              vtool -show-build dist/netpult | grep -i minos || true
+              ;;
+            *)
+              cargo build --release --locked --target ${{ matrix.target }}
+              mkdir -p dist
+              cp target/${{ matrix.target }}/release/netpult* dist/ 2>/dev/null || true
+              ;;
+          esac
+
+      - name: Тесты
+        if: matrix.name == 'linux-x86_64'
+        run: cargo test --locked
+
+      - name: Упаковка
+        shell: bash
+        run: |
+          set -eux
+          cd dist
+          if [ "${{ matrix.name }}" = "windows-x86_64" ]; then
+            asset="netpult-${{ matrix.name }}.zip"
+            7z a "$asset" netpult.exe
+          else
+            asset="netpult-${{ matrix.name }}.tar.gz"
+            chmod +x netpult
+            tar czf "$asset" netpult
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Выложить в релиз
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "dist/$ASSET" "dist/$ASSET.sha256" --clobber
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Снять черновик
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --draft=false
