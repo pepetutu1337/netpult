@@ -129,34 +129,65 @@ share_password =
 
 ## Установка
 
-Нужен собранный бинарь `netpult` и три внешних куска, которыми он управляет:
-**zapret** (обход DPI), **tglock-cli** (прокси Telegram) и по желанию **Happ**
-(VPN для геоблока и нода для сплита). netpult их не тащит за собой — он находит
-уже установленное и рулит им.
+Нужен бинарь `netpult` и три внешних куска, которыми он управляет: **zapret**
+(обход DPI), **tglock-cli** (прокси Telegram) и по желанию **Happ** (VPN для
+геоблока и нода для сплита). netpult их не тащит за собой — он находит уже
+установленное и рулит им.
 
-### 1. Собрать бинарь
+### 1. Поставить netpult
 
-Нужен Rust (`rustup`) и системный компоновщик (`cc`/`gcc`).
+Готовые сборки лежат в [релизах](https://github.com/pepetutu1337/netpult/releases):
+Linux x86-64 (статический, без зависимостей от glibc — идёт и на SteamOS, и на
+Ubuntu, и на Alpine), macOS 11 Big Sur и новее (универсальный бинарь Intel +
+Apple Silicon), Windows 10/11 x64.
+
+**Linux и macOS:**
 
 ```sh
-git clone git@github.com:<твой-аккаунт>/netpult.git
+curl -fsSL https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.ps1 | iex
+```
+
+Скрипт сам определит систему, скачает нужную сборку, сверит контрольную сумму и
+положит бинарь в `~/.local/bin` (на Windows — в `%LOCALAPPDATA%\netpult\bin`,
+добавив каталог в PATH). Проверка: `netpult version`.
+
+Ни Rust, ни компилятора, ни distrobox для установки не нужно — на SteamOS
+статический бинарь просто скачивается и запускается.
+
+> **Если GitHub не открывается.** Установщику netpult нужен доступ к тому же
+> GitHub, ради которого netpult и ставят. Поэтому каждая загрузка идёт сначала
+> напрямую, а потом через зеркала (`ghproxy.net`, `gh-proxy.com`, `ghfast.top`).
+> Своё зеркало задаётся переменной `NETPULT_MIRROR`, конкретная версия —
+> `NETPULT_VERSION=v0.1.0`, каталог установки — `NETPULT_BIN_DIR`.
+
+Руками, без скрипта: скачать `netpult-linux-x86_64.tar.gz` /
+`netpult-macos-universal.tar.gz` / `netpult-windows-x86_64.zip` со страницы
+релиза, распаковать, положить в любой каталог из PATH. На macOS скачанному
+файлу нужно снять карантин: `xattr -d com.apple.quarantine netpult`.
+
+<details>
+<summary>Собрать из исходников</summary>
+
+Нужен Rust 1.85+ (edition 2024) и системный компоновщик (`cc`).
+
+```sh
+git clone https://github.com/pepetutu1337/netpult.git
 cd netpult
 cargo build --release
 install -Dm755 target/release/netpult ~/.local/bin/netpult
 ```
 
-Убедись, что `~/.local/bin` в `PATH`. Проверка:
+На SteamOS корневая система read-only и без `cc`, поэтому локальная сборка там
+требует distrobox с тулчейном. Для обычной установки это не нужно — бери
+готовый бинарь из релизов.
 
-```sh
-netpult help
-```
-
-> **SteamOS:** корневая система read-only и без `cc`, поэтому Rust там не
-> слинкует. Собирай в distrobox с тулчейном (`distrobox create --name dev`,
-> внутри `dnf install gcc` / `pacman -S base-devel`), бинарь кладётся в общий
-> `$HOME`, запускается на хосте. Внутри distrobox может не быть интернета к
-> crates.io — тогда `cargo fetch` выполни на хосте, а в контейнере
-> `cargo build --release --offline`.
+</details>
 
 ### 2. zapret
 
@@ -216,6 +247,16 @@ Categories=Network;
 cargo build --release
 cargo test            # 8 тестов: QR-вектора, SOCKS5, маршрутизация, base64/auth
 ```
+
+Релиз собирает GitHub Actions (`.github/workflows/release.yml`) по тегу:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Он строит Linux на musl (статически), macOS универсальным бинарём с
+`MACOSX_DEPLOYMENT_TARGET=11.0` и Windows на MSVC, кладёт архивы и файлы
+`.sha256` в релиз и снимает черновик, когда все три собрались.
 
 ## Дальше
 

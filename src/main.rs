@@ -63,6 +63,10 @@ fn main() {
         "watch" => watch_command(&cfg, &rest),
         "qr" => show_qr_maybe_png(&cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
+        "version" | "-V" | "--version" => {
+            println!("netpult {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "help" | "-h" | "--help" => {
             print_help();
             Ok(())
@@ -812,6 +816,8 @@ fn print_help() {
   net tg on | off      включить / выключить
   net tg qr            QR для телефона (net tg qr --png [файл] — сохранить картинкой)
   net tg link          ссылки для компьютера и телефона
-  net tg newsecret     сменить секрет прокси (QR на телефоне придётся пересканировать)"
+  net tg newsecret     сменить секрет прокси (QR на телефоне придётся пересканировать)
+
+  net version          версия"
     );
 }
