@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 /// Сколько строк вывода команды показывать.
 const OUTPUT_ROWS: usize = 8;
 
-/// Сколько нод помещается в список.
-const NODE_ROWS: usize = 7;
+/// Наименьшее место под ноды, если окно совсем низкое.
+const NODE_ROWS_MIN: usize = 5;
 
 /// Весточка из рабочего потока.
 enum Work {
@@ -405,6 +405,16 @@ fn hand_over(line: &str) -> (bool, String) {
     }
 }
 
+/// Дополнить до ширины по видимым знакам. Обычное форматирование считает
+/// байты, а флаги стран занимают их по четыре штуки — столбец разъезжается.
+fn pad(text: &str, width: usize) -> String {
+    let visible = text.chars().count();
+    if visible >= width {
+        return text.to_string();
+    }
+    format!("{text}{}", " ".repeat(width - visible))
+}
+
 fn strip_colors(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars();
@@ -513,25 +523,45 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     }
     rows.push(String::new());
 
-    // Ноды или, если их нет, вывод последней команды — место одно и то же.
+    // Список нод занимает всё, что осталось от окна: показывать семь строк из
+    // двадцати двух — значит прятать половину подписки без причины.
+    let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
+    let fixed = rows.len() + OUTPUT_ROWS + 9;
+    let room = height.saturating_sub(fixed).max(NODE_ROWS_MIN);
+
     if screen.nodes.is_empty() {
-        rows.push(format!("  {DIM}НОДЫ{RESET}  {DIM}подписки нет: набери vpn sub и вставь ссылку{RESET}"));
-        for _ in 0..NODE_ROWS {
+        rows.push(format!(
+            "  {DIM}НОДЫ{RESET}  {DIM}подписки нет: набери vpn sub и вставь ссылку{RESET}"
+        ));
+        for _ in 0..room {
             rows.push(String::new());
         }
     } else {
+        let here = screen
+            .current
+            .clone()
+            .unwrap_or_else(|| "не выбрана".to_string());
         rows.push(format!(
-            "  {DIM}НОДЫ{RESET}  {DIM}↑↓ — выбор, Enter — включить, p — замерить{RESET}"
+            "  {DIM}НОДЫ{RESET} {GREEN}{here}{RESET}  {DIM}{}/{} · ↑↓ выбор · Enter включить · p замерить{RESET}",
+            screen.node_at + 1,
+            screen.nodes.len()
         ));
+
+        // Окно прокрутки держится вокруг выбранной строки, а не стоит на месте.
+        let shown = room.min(screen.nodes.len());
         let first = screen
             .node_at
-            .saturating_sub(NODE_ROWS - 1)
-            .min(screen.nodes.len().saturating_sub(NODE_ROWS.min(screen.nodes.len())));
-        for (offset, node) in screen.nodes.iter().skip(first).take(NODE_ROWS).enumerate() {
+            .saturating_sub(shown / 2)
+            .min(screen.nodes.len() - shown);
+        for (offset, node) in screen.nodes.iter().skip(first).take(shown).enumerate() {
             let index = first + offset;
             let selected = index == screen.node_at;
-            let here = screen.current.as_deref() == Some(node.name.as_str());
-            let mark = if here { "●" } else { " " };
+            let current = screen.current.as_deref() == Some(node.name.as_str());
+            let mark = if current {
+                format!("{GREEN}●{RESET}")
+            } else {
+                " ".to_string()
+            };
             let delay = match node.delay {
                 None => format!("{DIM}—{RESET}"),
                 Some(None) => format!("{RED}молчит{RESET}"),
@@ -546,13 +576,14 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
                     format!("{color}{ms} мс{RESET}")
                 }
             };
+            let name = pad(&node.name, 26);
             if selected {
-                rows.push(format!("  {GREEN}▸{RESET} {mark} {:<26} {delay}", node.name));
+                rows.push(format!("  {GREEN}▸{RESET} {mark} {name} {delay}"));
             } else {
-                rows.push(format!("    {mark} {:<26} {delay}", node.name));
+                rows.push(format!("    {mark} {name} {delay}"));
             }
         }
-        for _ in screen.nodes.len()..NODE_ROWS {
+        for _ in shown..room {
             rows.push(String::new());
         }
     }

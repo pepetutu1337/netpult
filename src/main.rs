@@ -1069,61 +1069,77 @@ pub fn run_test_public(cfg: &Config) {
 
 fn print_help() {
     println!(
-        "{BOLD}netpult — пульт обхода блокировок{RESET}
+        "{BOLD}netpult{RESET} — обход блокировок: zapret, VPN, прокси Telegram, раздача, сплит.
 
-  net                  интерактивный экран (по умолчанию)
-  net status           состояние всего сразу и внешний адрес
-  net test             проверить YouTube / Discord / Telegram и скорость
+{BOLD}экран{RESET}
+  net                  открыть экран: состояние, ноды, строка команд
+  {DIM}в строке набирается любая команда отсюда — покажет похожие;
+  пока строка пуста: ↑↓ — нода, Enter — включить её, p — замерить
+  задержки, r — обновить, q — выход{RESET}
 
-{BOLD}zapret{RESET} — обход DPI на прямом трафике
-  net on | off | toggle | restart
+{BOLD}zapret{RESET} — обход DPI: YouTube, Discord
+  net on               включить
+  net off              выключить
+  net restart          перезапустить
+  net toggle           переключить
   net strat            список стратегий
-  net strat <номер|имя>  поставить стратегию
-  net tune             подобрать рабочую стратегию перебором
+  net strat <номер>    поставить стратегию номером или именем
+  net tune             подобрать рабочую перебором
   net tune --all       перебрать все, не останавливаясь на первой хорошей
 
-{BOLD}сторож{RESET} — сам чинит, когда обход отвалился
+{BOLD}VPN{RESET} — своё ядро sing-box вместо Happ
+  net vpn core install поставить ядро под свою систему
+  net vpn sub <ссылка> разобрать подписку и собрать конфиг
+  net vpn update       перечитать подписку по сохранённой ссылке
+  net vpn on           поднять туннель (спросит пароль: TUN нужен root)
+  net vpn off          снять туннель
+  net vpn nodes        ноды с задержками
+  net vpn use          выбрать ноду стрелками
+  net vpn use <номер|имя>  выбрать сразу: «net vpn use Турция»
+  net vpn auto         выбирать самую быструю самому
+  net vpn log          журнал ядра
+
+{BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
+  net tg on            включить
+  net tg off           выключить
+  net tg qr            QR для телефона
+  net tg qr --png [файл]   сохранить QR картинкой
+  net tg link          ссылки для компьютера и телефона
+  net tg newsecret     сменить секрет прокси
+
+{BOLD}сплит{RESET} — через ноду только нужные домены, остальное напрямую
+  net split on         включить
+  net split off        выключить
+  net split list       какие домены идут через ноду
+  net split add <дом>  добавить домен в свой список
+  net split update     обновить автосписок геоблока
+  net split log        что шло через ноду, а что напрямую
+
+{BOLD}раздача{RESET} — телефон в интернет через этот компьютер
+  net share on         включить (пароль обязателен)
+  net share off        выключить
+  net share open       включить без пароля, если очень надо
+  net share status     адрес, порт, пароль, подключённые устройства
+  net share password   показать пароль
+  net share newpass    сменить пароль
+
+{BOLD}профили сетей{RESET} — своё поведение в каждой сети
+  net profile          какая сеть и что для неё сохранено
+  net profile save     запомнить состояние для этой сети
+  net profile apply    привести всё к профилю сети
+  net profile list     все профили
+  net profile forget   забыть профиль этой сети
+
+{BOLD}сторож{RESET} — чинит упавшее без тебя
   net watch --once     один проход проверки прямо сейчас
   net watch install    поставить в автозапуск
   net watch uninstall  убрать из автозапуска
   net watch log        что чинилось
 
-{BOLD}профили{RESET} — своё поведение в каждой сети
-  net profile          какая сеть и что для неё сохранено
-  net profile save     запомнить текущее состояние для этой сети
-  net profile apply    привести всё к профилю сети
-  net profile list     все профили
-
-{BOLD}раздача{RESET} — телефон ходит в интернет через этот компьютер
-  net share on|off     включить / выключить прокси для телефона (пароль обязателен)
-  net share status     адрес, порт, пароль и подключённые устройства
-  net share password   показать текущий пароль
-  net share newpass    сменить пароль (по твоей команде, сам не меняется)
-
-{BOLD}сплит{RESET} — через ноду только нужные домены, остальное напрямую
-  net split on|off     включить / выключить сплит-прокси
-  net split list       какие домены идут через ноду (свой список + автосписок)
-  net split add <дом>  добавить домен в свой список
-  net split update     обновить автосписок геоблока (itdoginfo, ~466 доменов)
-  net split log        что шло через ноду, а что напрямую
-
-{BOLD}VPN{RESET} — для геоблока, когда сервис режет по стране
-  net vpn              открыть окно клиента
-  net vpn off          закрыть
-  net vpn sub <ссыл>   разобрать подписку и собрать конфиг своего ядра
-  net vpn update       перечитать подписку
-  net vpn nodes        ноды с задержками
-  net vpn use <ном>    выбрать ноду (номером или частью имени)
-  net vpn auto         выбирать самую быструю самому
-  net vpn core install поставить ядро sing-box
-  net vpn log          журнал ядра
-
-{BOLD}Telegram{RESET} — локальный прокси, без чужих серверов
-  net tg on | off      включить / выключить
-  net tg qr            QR для телефона (net tg qr --png [файл] — сохранить картинкой)
-  net tg link          ссылки для компьютера и телефона
-  net tg newsecret     сменить секрет прокси (QR на телефоне придётся пересканировать)
-
-  net version          версия"
+{BOLD}прочее{RESET}
+  net status           состояние всего и внешний адрес
+  net test             проверить YouTube, Discord, Telegram и скорость
+  net version          версия
+  net help             эта справка"
     );
 }
