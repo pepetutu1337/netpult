@@ -13,7 +13,7 @@ use crate::tune;
 use crate::vpn::Vpn;
 use crate::zapret::{self, Zapret};
 use crate::{qr, status_lines, BOLD, DIM, GREEN, RED, RESET, YELLOW};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 use std::io::Write;
 use std::time::Duration;
@@ -22,44 +22,70 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     let mut message: Option<(bool, String)> = None;
     let mut input = String::new();
     let mut cursor = 0usize;
+    // Состояние опрашивает систему (службы, процессы, интерфейсы) — делать это
+    // на каждую нажатую букву значит превратить набор в рывки. Держим снимок и
+    // обновляем его по времени и после действий.
+    let mut status = status_lines(cfg);
+    let mut status_taken = std::time::Instant::now();
 
-    loop {
-        let all = crate::commands();
-        let items: Vec<crate::picker::Item> = all
-            .iter()
-            .map(|(name, about)| crate::picker::Item::new(*name).hint(*about))
-            .collect();
-        let matches = if input.trim().is_empty() {
-            Vec::new()
-        } else {
-            crate::picker::filter(&items, input.trim())
-        };
+    let all = crate::commands();
+    let items: Vec<crate::picker::Item> = all
+        .iter()
+        .map(|(name, about)| crate::picker::Item::new(*name).hint(*about))
+        .collect();
+
+    terminal::enable_raw_mode().map_err(|e| e.to_string())?;
+    let _ = crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste);
+    print!("\x1b[2J");
+
+    let result = loop {
+        if status_taken.elapsed() > Duration::from_secs(5) {
+            status = status_lines(cfg);
+            status_taken = std::time::Instant::now();
+        }
+
+        let matches = suggest(&items, &input);
         if cursor >= matches.len() {
             cursor = 0;
         }
+        draw(&status, message.as_ref(), &input, &matches, cursor);
 
-        draw(cfg, message.as_ref(), &input, &all, &matches, cursor);
-        let Some(key) = read_key()? else { continue };
+        let event = match event::read() {
+            Ok(e) => e,
+            Err(e) => break Err(e.to_string()),
+        };
+        // Вставка ссылки приходит одним событием, а не потоком клавиш: без
+        // этой ветки вставленное просто пропадало.
+        if let Event::Paste(text) = &event {
+            input.push_str(text.trim());
+            cursor = 0;
+            continue;
+        }
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
 
-        // Пока строка пуста, клавиши работают по-старому: цифра — действие.
         if input.is_empty() {
-            match key {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    println!();
-                    return Ok(());
-                }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
                 KeyCode::Char(c) if c.is_ascii_digit() => {
-                    message = hotkey(cfg, c)?;
+                    let outcome = paused(|| hotkey(cfg, c));
+                    match outcome {
+                        Ok(value) => message = value,
+                        Err(e) => message = Some((false, e)),
+                    }
+                    status = status_lines(cfg);
+                    status_taken = std::time::Instant::now();
                     continue;
                 }
-                // Косая черта привычна как «открыть команды», но строка тут и
-                // так всегда открыта — просто не считаем её вводом.
                 KeyCode::Char('/') => continue,
                 _ => {}
             }
         }
 
-        match key {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => break Ok(()),
             KeyCode::Esc => {
                 input.clear();
                 cursor = 0;
@@ -79,10 +105,8 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                 }
             }
             KeyCode::Enter => {
-                // Выбранная подсказка главнее набранного: обычно набирают
-                // половину, а хотят целое.
                 let line = match matches.get(cursor) {
-                    Some(index) => all[*index].0.to_string(),
+                    Some(suggestion) => suggestion.line.clone(),
                     None => input.trim().to_string(),
                 };
                 input.clear();
@@ -90,7 +114,9 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                 if line.is_empty() {
                     continue;
                 }
-                message = Some(run_line(cfg, &line));
+                message = Some(paused(|| Ok(run_line(cfg, &line)))?);
+                status = status_lines(cfg);
+                status_taken = std::time::Instant::now();
             }
             KeyCode::Char(c) => {
                 input.push(c);
@@ -98,7 +124,57 @@ pub fn run(cfg: &Config) -> Result<(), String> {
             }
             _ => {}
         }
+    };
+
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste);
+    terminal::disable_raw_mode().map_err(|e| e.to_string())?;
+    println!();
+    result
+}
+
+/// Подсказка: что показать и что выполнить.
+pub struct Suggestion {
+    /// Команда целиком, как её выполнять.
+    pub line: String,
+    /// Что показать слева.
+    pub label: String,
+    /// Пояснение справа.
+    pub about: String,
+}
+
+/// Похожие команды под набранным. Вставленная ссылка — особый случай: человек
+/// вставляет подписку и ждёт, что с ней что-то произойдёт, а не ищет команду
+/// с такими буквами.
+fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
+    let typed = input.trim();
+    if typed.is_empty() {
+        return Vec::new();
     }
+    if typed.starts_with("http://") || typed.starts_with("https://") {
+        return vec![Suggestion {
+            line: format!("vpn sub {typed}"),
+            label: "vpn sub <ссылка>".to_string(),
+            about: "загрузить подписку по вставленной ссылке".to_string(),
+        }];
+    }
+    crate::picker::filter(items, typed)
+        .into_iter()
+        .map(|index| Suggestion {
+            line: items[index].label.clone(),
+            label: items[index].label.clone(),
+            about: items[index].hint.clone().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Выйти из сырого режима на время действия: команды печатают обычным
+/// образом, а в сыром режиме перевод строки не возвращает каретку.
+fn paused<T>(action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    terminal::disable_raw_mode().ok();
+    let result = action();
+    terminal::enable_raw_mode().ok();
+    print!("\x1b[2J");
+    result
 }
 
 /// Выполнить набранную строку так же, как если бы её набрали в терминале.
@@ -106,7 +182,7 @@ fn run_line(cfg: &Config, line: &str) -> (bool, String) {
     let parts: Vec<&str> = line.split_whitespace().collect();
     clear();
     println!("{DIM}  net {line}{RESET}\n");
-    let outcome = match crate::dispatch(cfg, parts[0], &parts[1..]) {
+    let outcome = match crate::dispatch_with(cfg, parts[0], &parts[1..], false) {
         Ok(()) => (true, format!("выполнено: {line}")),
         Err(e) => (false, e),
     };
@@ -195,58 +271,83 @@ fn clear() {
 }
 
 fn draw(
-    cfg: &Config,
+    status: &[(bool, String)],
     message: Option<&(bool, String)>,
     input: &str,
-    all: &[(&str, &str)],
-    matches: &[usize],
+    matches: &[Suggestion],
     cursor: usize,
 ) {
-    clear();
-    println!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}\n");
-
-    for (ok, line) in status_lines(cfg) {
-        let (color, dot) = if ok { (GREEN, "●") } else { (RED, "○") };
-        println!("  {color}{dot} {line}{RESET}");
+    // Кадр собирается целиком и печатается одним куском поверх старого: экран
+    // не чистится, поэтому не мигает. Каждая строка затирает хвост прежней.
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}"));
+    rows.push(String::new());
+    for (ok, text) in status {
+        let (color, dot) = if *ok { (GREEN, "●") } else { (RED, "○") };
+        rows.push(format!("  {color}{dot} {text}{RESET}"));
     }
-    println!();
+    rows.push(String::new());
 
-    if input.trim().is_empty() {
-        println!(
-            "  {DIM}[1]{RESET} zapret вкл/выкл   {DIM}[2]{RESET} стратегия   {DIM}[3]{RESET} проверить"
-        );
-        println!(
-            "  {DIM}[4]{RESET} VPN               {DIM}[5]{RESET} Telegram    {DIM}[6]{RESET} QR на телефон"
-        );
-        println!(
-            "  {DIM}[7]{RESET} автоподбор        {DIM}[8]{RESET} раздача     {DIM}[9]{RESET} профиль сети"
-        );
-        println!("  {DIM}[q]{RESET} выход");
-    } else if matches.is_empty() {
-        println!("  {YELLOW}похожих команд нет{RESET}");
+    // Быстрые клавиши видны всегда — иначе они «пропадают» при наборе.
+    rows.push(format!(
+        "  {DIM}[1]{RESET} zapret вкл/выкл   {DIM}[2]{RESET} стратегия   {DIM}[3]{RESET} проверить"
+    ));
+    rows.push(format!(
+        "  {DIM}[4]{RESET} VPN               {DIM}[5]{RESET} Telegram    {DIM}[6]{RESET} QR на телефон"
+    ));
+    rows.push(format!(
+        "  {DIM}[7]{RESET} автоподбор        {DIM}[8]{RESET} раздача     {DIM}[9]{RESET} профиль сети"
+    ));
+    rows.push(format!("  {DIM}[q]{RESET} выход"));
+    rows.push(String::new());
+
+    // Место под подсказки — всегда одной высоты, иначе строка ввода прыгает.
+    const ROWS: usize = 6;
+    let mut hints: Vec<String> = Vec::new();
+    if matches.is_empty() && !input.trim().is_empty() {
+        hints.push(format!("  {YELLOW}похожих команд нет{RESET}"));
     } else {
-        // Больше восьми строк подсказок читать уже некогда.
-        for (row, index) in matches.iter().take(8).enumerate() {
-            let (name, about) = all[*index];
-            if row == cursor {
-                println!("  {GREEN}▸ {name}{RESET}  {DIM}{about}{RESET}");
+        let shown = matches.len().min(ROWS);
+        let first = cursor
+            .saturating_sub(ROWS - 1)
+            .min(matches.len().saturating_sub(shown));
+        for item in matches.iter().skip(first).take(ROWS) {
+            let selected = matches
+                .get(cursor)
+                .map(|c| std::ptr::eq(c, item))
+                .unwrap_or(false);
+            if selected {
+                hints.push(format!(
+                    "  {GREEN}▸ {}{RESET}  {DIM}{}{RESET}",
+                    item.label, item.about
+                ));
             } else {
-                println!("    {name}  {DIM}{about}{RESET}");
+                hints.push(format!("    {}  {DIM}{}{RESET}", item.label, item.about));
             }
         }
-        if matches.len() > 8 {
-            println!("  {DIM}…ещё {}{RESET}", matches.len() - 8);
+    }
+    while hints.len() < ROWS {
+        hints.push(String::new());
+    }
+    rows.extend(hints);
+
+    rows.push(match message {
+        Some((ok, text)) => {
+            let color = if *ok { GREEN } else { YELLOW };
+            format!("  {color}{text}{RESET}")
         }
-    }
+        None => String::new(),
+    });
+    rows.push(String::new());
 
-    if let Some((ok, text)) = message {
-        let color = if *ok { GREEN } else { YELLOW };
-        println!("\n  {color}{text}{RESET}");
+    let mut frame = String::from("\x1b[H");
+    for row in rows {
+        frame.push_str(&row);
+        frame.push_str("\x1b[K\r\n");
     }
+    frame.push_str(&format!("  {BOLD}›{RESET} {input}▏\x1b[K\x1b[J"));
 
-    // Строка ввода всегда последняя: глаз ищет её внизу, как в оболочке.
-    println!();
-    print!("  {BOLD}›{RESET} {input}▏");
+    print!("{frame}");
     std::io::stdout().flush().ok();
 }
 

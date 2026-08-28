@@ -50,6 +50,17 @@ fn main() {
 /// Разбор команды. Вынесен из main, чтобы палитра могла запускать выбранное
 /// тем же путём, каким его набирают руками.
 pub fn dispatch(cfg: &Config, command: &str, rest: &[&str]) -> Result<(), String> {
+    dispatch_with(cfg, command, rest, true)
+}
+
+/// `palette` — можно ли на незнакомую команду открыть выбор. Из экрана нельзя:
+/// там подсказки и так под строкой ввода, второй список поверх собьёт с толку.
+pub fn dispatch_with(
+    cfg: &Config,
+    command: &str,
+    rest: &[&str],
+    palette: bool,
+) -> Result<(), String> {
     let cfg = cfg;
     let rest = rest.to_vec();
     match command {
@@ -84,7 +95,14 @@ pub fn dispatch(cfg: &Config, command: &str, rest: &[&str]) -> Result<(), String
             print_help();
             Ok(())
         }
-        other => unknown_command(cfg, other, &rest),
+        other if palette => unknown_command(cfg, other, &rest),
+        other => Err(format!(
+            "нет такой команды: {other}{}",
+            match picker::closest(&commands(), other, 2).first() {
+                Some(close) => format!(". Похоже на «{close}»"),
+                None => String::new(),
+            }
+        )),
     }
 }
 
