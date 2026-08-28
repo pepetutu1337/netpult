@@ -77,7 +77,14 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     let (sender, receiver): (Sender<Work>, Receiver<Work>) = mpsc::channel();
 
     terminal::enable_raw_mode().map_err(|e| e.to_string())?;
-    let _ = crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste);
+    // Свой буфер экрана: кадр рисуется поверх себя, а история терминала
+    // остаётся нетронутой. Без этого длинный вывод прокручивал экран, и
+    // заголовок печатался снова и снова.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        terminal::EnterAlternateScreen,
+        event::EnableBracketedPaste
+    );
     print!("\x1b[2J");
 
     let result = loop {
@@ -210,7 +217,11 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         }
     };
 
-    let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        event::DisableBracketedPaste,
+        terminal::LeaveAlternateScreen
+    );
     terminal::disable_raw_mode().map_err(|e| e.to_string())?;
     println!();
     result
@@ -372,10 +383,20 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
     });
 }
 
-/// Просит ли команда пароль.
+/// Нужен ли команде весь экран.
+///
+/// Две причины: она спрашивает пароль (sudo некуда спросить, если клавиатура
+/// у нас) или её вывод не лезет в панель на восемь строк — QR-код, справка,
+/// длинные списки. Панель такой вывод не показывает, а калечит.
 fn needs_terminal(line: &str) -> bool {
-    ["vpn on", "vpn off", "watch install", "watch uninstall"]
+    const PASSWORD: [&str; 4] = ["vpn on", "vpn off", "watch install", "watch uninstall"];
+    const BIG: [&str; 12] = [
+        "tg qr", "tg link", "help", "test", "tune", "status", "strat", "split list", "split log",
+        "share status", "vpn log", "watch log",
+    ];
+    PASSWORD
         .iter()
+        .chain(BIG.iter())
         .any(|name| line == *name || line.starts_with(&format!("{name} ")))
 }
 
@@ -387,6 +408,7 @@ fn hand_over(line: &str) -> (bool, String) {
     };
     let args: Vec<&str> = line.split_whitespace().collect();
     terminal::disable_raw_mode().ok();
+    let _ = crossterm::execute!(std::io::stdout(), terminal::LeaveAlternateScreen);
     print!("\x1b[2J\x1b[H");
     println!("{DIM}  net {line}{RESET}\n");
     std::io::stdout().flush().ok();
@@ -397,6 +419,7 @@ fn hand_over(line: &str) -> (bool, String) {
     std::io::stdout().flush().ok();
     terminal::enable_raw_mode().ok();
     let _ = event::read();
+    let _ = crossterm::execute!(std::io::stdout(), terminal::EnterAlternateScreen);
     print!("\x1b[2J");
 
     match status {
