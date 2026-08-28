@@ -53,7 +53,9 @@ pub fn choose_prefilled(title: &str, items: &[Item], query: &str) -> Result<Opti
     }
     // Без терминала стрелок не бывает: в трубе или в скрипте лучше честно
     // сказать, чем ждать нажатия, которого не будет.
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || std::env::var_os("NETPULT_PLAIN").is_some()
+    {
         return Err("выбор стрелками работает только в терминале — укажи имя или номер".into());
     }
     let mut query = query.to_string();

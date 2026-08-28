@@ -184,12 +184,19 @@ pub fn run(cfg: &Config) -> Result<(), String> {
             KeyCode::Enter => {
                 let line = match suggestions.get(screen.suggestion_at) {
                     Some(found) => found.line.clone(),
-                    None => screen.input.trim().to_string(),
+                    None => strip_own_name(&screen.input),
                 };
                 screen.input.clear();
                 screen.suggestion_at = 0;
-                if !line.is_empty() {
-                    start_command(&mut screen, sender.clone(), &line);
+                match line.as_str() {
+                    "" => {}
+                    // Выбор ноды живёт на этом же экране — незачем звать
+                    // отдельный список поверх него.
+                    "vpn use" | "vpn nodes" => {
+                        screen.message =
+                            Some((true, "ноды выше: стрелки — выбор, Enter — включить, p — замерить".into()))
+                    }
+                    _ => start_command(&mut screen, sender.clone(), &line),
                 }
             }
             KeyCode::Char(c) => {
@@ -306,6 +313,12 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
     std::thread::spawn(move || {
         let child = std::process::Command::new(exe)
             .args(&args)
+            // Внутри экрана списки рисует сам экран: подпроцессу интерактив
+            // запрещён, иначе его управляющие коды лезут в панель вывода.
+            .env("NETPULT_PLAIN", "1")
+            // Клавиатура принадлежит экрану: без этого подпроцесс перехватывал
+            // бы нажатия у себя.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();
@@ -318,14 +331,20 @@ fn start_command(screen: &mut Screen, sender: Sender<Work>, line: &str) {
         };
         if let Some(out) = child.stdout.take() {
             for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-                let _ = sender.send(Work::Line(line));
+                let clean = strip_colors(&line);
+                if !clean.trim().is_empty() {
+                    let _ = sender.send(Work::Line(clean));
+                }
             }
         }
         let mut trouble = String::new();
         if let Some(err) = child.stderr.take() {
             for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
-                trouble.push_str(line.trim());
-                let _ = sender.send(Work::Line(line));
+                let clean = strip_colors(&line);
+                trouble.push_str(clean.trim());
+                if !clean.trim().is_empty() {
+                    let _ = sender.send(Work::Line(clean));
+                }
             }
         }
         let ok = child.wait().map(|s| s.success()).unwrap_or(false);
@@ -373,7 +392,8 @@ pub struct Suggestion {
 /// действия, а не поиска команды с такими буквами) и команда с аргументами —
 /// «vpn use Турция» ни на что не похоже по буквам, но выполнить его надо.
 fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
-    let typed = input.trim();
+    let typed = strip_own_name(input);
+    let typed = typed.as_str();
     if typed.is_empty() {
         return Vec::new();
     }
@@ -405,6 +425,18 @@ fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
         );
     }
     found
+}
+
+/// Внутри пульта имя пульта писать незачем, но рука набирает его по привычке —
+/// молча срезаем, иначе «net vpn nodes» не совпадёт ни с чем.
+pub fn strip_own_name(input: &str) -> String {
+    let typed = input.trim();
+    for name in ["netpult ", "net "] {
+        if let Some(rest) = typed.strip_prefix(name) {
+            return rest.trim().to_string();
+        }
+    }
+    typed.to_string()
 }
 
 fn find_url(text: &str) -> Option<String> {
