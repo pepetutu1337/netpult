@@ -45,7 +45,8 @@ struct Screen {
     status_taken: Instant,
     nodes: Vec<Node>,
     node_at: usize,
-    current: Option<String>,
+    /// Нода, через которую идёт трафик, и выбрана ли она автоподбором.
+    current: Option<(String, bool)>,
     input: String,
     suggestion_at: usize,
     output: Vec<String>,
@@ -95,7 +96,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                     screen.status = status_lines(cfg);
                     screen.status_taken = Instant::now();
                     screen.nodes = merge_nodes(screen.nodes);
-                    screen.current = singbox::current_node();
+                    screen.current = singbox::active_node();
                 }
             }
         }
@@ -156,7 +157,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                     screen.status = status_lines(cfg);
                     screen.status_taken = Instant::now();
                     screen.nodes = load_nodes();
-                    screen.current = singbox::current_node();
+                    screen.current = singbox::active_node();
                     continue;
                 }
                 _ => {}
@@ -255,7 +256,7 @@ fn choose_node(screen: &mut Screen) {
     };
     screen.message = Some(match singbox::select(&node.name) {
         Ok(()) => {
-            screen.current = Some(node.name.clone());
+            screen.current = Some((node.name.clone(), false));
             (true, format!("нода: {}", node.name))
         }
         Err(e) => (false, e),
@@ -537,10 +538,11 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
             rows.push(String::new());
         }
     } else {
-        let here = screen
-            .current
-            .clone()
-            .unwrap_or_else(|| "не выбрана".to_string());
+        let here = match &screen.current {
+            Some((name, true)) => format!("{name}  {DIM}(автоподбор){RESET}"),
+            Some((name, false)) => name.clone(),
+            None => "не выбрана".to_string(),
+        };
         rows.push(format!(
             "  {DIM}НОДЫ{RESET} {GREEN}{here}{RESET}  {DIM}{}/{} · ↑↓ выбор · Enter включить · p замерить{RESET}",
             screen.node_at + 1,
@@ -556,7 +558,10 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
         for (offset, node) in screen.nodes.iter().skip(first).take(shown).enumerate() {
             let index = first + offset;
             let selected = index == screen.node_at;
-            let current = screen.current.as_deref() == Some(node.name.as_str());
+            let current = screen
+                .current
+                .as_ref()
+                .is_some_and(|(name, _)| *name == node.name);
             let mark = if current {
                 format!("{GREEN}●{RESET}")
             } else {

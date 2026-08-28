@@ -127,6 +127,14 @@ impl<'a> Zapret<'a> {
             return Err("zapret не установлен".into());
         }
         if cfg!(target_os = "linux") {
+            // Служба, перезапущенная слишком часто, попадает в start-limit-hit
+            // и дальше не стартует вовсе, пока счётчик не сброшен. Сбрасываем
+            // молча: для «включи обход» это внутренняя кухня systemd.
+            if action != "stop" {
+                let _ = Command::new("sudo")
+                    .args(["systemctl", "reset-failed", &self.cfg.zapret_service])
+                    .status();
+            }
             let status = Command::new("sudo")
                 .args(["systemctl", action, &self.cfg.zapret_service])
                 .status()

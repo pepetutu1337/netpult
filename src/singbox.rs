@@ -270,6 +270,19 @@ pub fn current_node() -> Option<String> {
     field(&body, "now")
 }
 
+/// Нода, через которую на самом деле идёт трафик.
+///
+/// Селектор может стоять на автоподборе, и тогда его «now» — это слово «auto»,
+/// а не страна. Настоящую ноду знает сам автоподбор, у него и спрашиваем.
+pub fn active_node() -> Option<(String, bool)> {
+    let chosen = current_node()?;
+    if chosen != AUTO {
+        return Some((chosen, false));
+    }
+    let body = api_get(&format!("/proxies/{AUTO}"))?;
+    field(&body, "now").map(|name| (name, true))
+}
+
 /// Переключить ноду. Без перезапуска ядра — соединения переедут сами.
 pub fn select(name: &str) -> Result<(), String> {
     let body = format!("{{\"name\": {}}}", crate::json::escape(name));
