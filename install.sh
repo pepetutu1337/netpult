@@ -21,11 +21,16 @@ die() { red "$1"; exit 1; }
 # зеркала. Пустой префикс = прямая попытка.
 fetch() { # fetch <url> <выходной файл|-> ; перебирает зеркала
   _url="$1"; _out="$2"
+  # --speed-time: соединение, которое установилось и встало, обрывается через
+  # двадцать секунд молчания. Без этого первая же мёртвая попытка съедала весь
+  # запас времени, и до зеркал очередь не доходила.
   for _m in ${NETPULT_MIRROR:-} "" https://ghproxy.net/ https://gh-proxy.com/ https://ghfast.top/; do
     if [ "$_out" = "-" ]; then
-      curl -fsL --connect-timeout 10 --max-time 60 "$_m$_url" && return 0
+      curl -fsL --connect-timeout 8 --max-time 30 --speed-time 15 --speed-limit 512 \
+        "$_m$_url" && return 0
     else
-      curl -fsL --connect-timeout 10 --max-time 300 -o "$_out" "$_m$_url" && return 0
+      curl -fsL --connect-timeout 8 --max-time 180 --speed-time 20 --speed-limit 1024 \
+        -o "$_out" "$_m$_url" && return 0
     fi
   done
   return 1
@@ -62,7 +67,17 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 say "Качаю netpult $version ($os/$arch)..."
-fetch "$url" "$tmp/$asset" || die "не скачалось: $url"
+if ! fetch "$url" "$tmp/$asset"; then
+  red "не скачалось: $url"
+  red ""
+  red "Файлы релизов GitHub лежат на release-assets.githubusercontent.com, и"
+  red "в России этот адрес часто режут до нескольких сотен байт в секунду."
+  red "Что помогает:"
+  red "  · включить обход или VPN и повторить;"
+  red "  · своё зеркало: NETPULT_MIRROR=https://ваше-зеркало/ sh install.sh"
+  red "  · собрать из исходников: cargo build --release"
+  exit 1
+fi
 
 if fetch "$url.sha256" "$tmp/$asset.sha256" 2>/dev/null; then
   expected="$(awk '{print $1}' "$tmp/$asset.sha256")"

@@ -422,9 +422,14 @@ pub fn install_core() -> Result<PathBuf, String> {
             .args([
                 "-fsSL",
                 "--connect-timeout",
-                "10",
+                "8",
                 "--max-time",
                 "600",
+                // Встал и молчит — не ждём десять минут, идём к зеркалу.
+                "--speed-time",
+                "20",
+                "--speed-limit",
+                "2048",
                 "-o",
                 &target.to_string_lossy(),
                 &format!("{mirror}{url}"),
