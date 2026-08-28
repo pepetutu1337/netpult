@@ -11,11 +11,9 @@ set -eu
 
 VERSION="${1:-v1.13.19}"
 OUT="${2:-dist}"
-# Go 1.24 — последний, кто ставит маковский minos 11.0. Он же ломает сборку под
-# Windows: tfo-go лезет во внутренности net через linkname, а в 1.24 их
-# перекрыли. Поэтому маки собираем старым Go, остальных — свежим.
-GO_MAC="go1.24.10"
-GO_NEW="go1.25.3"
+# Go 1.24 — последний, кто ставит маковский minos 11.0. Свежее ядро им же и
+# собирается: Go новее рвёт linkname в badtls.
+GO_VERSION="go1.24.10"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -37,19 +35,21 @@ fetch_go() { # fetch_go <версия> ; печатает путь к go
   fi
   printf '%s\n' "$_dir/bin/go"
 }
-GO_MAC_BIN="$(fetch_go "$GO_MAC")"
-GO_NEW_BIN="$(fetch_go "$GO_NEW")"
+GO="$(fetch_go "$GO_VERSION")"
 
 say "Беру sing-box $VERSION..."
 git clone -q --depth 1 -b "$VERSION" https://github.com/SagerNet/sing-box "$WORK/src"
 TAGS="$(cat "$WORK/src/release/DEFAULT_BUILD_TAGS_OTHERS")"
+# Ядро лезет во внутренности стандартной библиотеки через linkname, и без
+# -checklinkname=0 линковка падает. Флаги берём у самого проекта, чтобы наша
+# сборка не отличалась от официальной.
+LDFLAGS_SHARED="$(cat "$WORK/src/release/LDFLAGS")"
 build() { # build <goos> <goarch> <имя файла>
   say "  $3"
-  _go="$GO_NEW_BIN"
-  [ "$1" = darwin ] && _go="$GO_MAC_BIN"
   ( cd "$WORK/src" && CGO_ENABLED=0 GOOS="$1" GOARCH="$2" GOTOOLCHAIN=local \
-      MACOSX_DEPLOYMENT_TARGET=11.0 "$_go" build -trimpath \
-      -tags "$TAGS" -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION#v}" \
+      MACOSX_DEPLOYMENT_TARGET=11.0 "$GO" build -trimpath \
+      -tags "$TAGS" \
+      -ldflags "$LDFLAGS_SHARED -s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION#v}" \
       -o "$OUT/$3" ./cmd/sing-box )
 }
 

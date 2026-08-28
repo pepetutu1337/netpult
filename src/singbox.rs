@@ -105,13 +105,20 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
   }},
   "experimental": {{
     "clash_api": {{"external_controller": "{api}"}},
-    "cache_file": {{"enabled": true}}
+    "cache_file": {{"enabled": true, "path": "{cache}"}}
   }}
 }}
 "#,
         selector = SELECTOR,
         outbounds = all.join(",\n    "),
-        api = CLASH_API
+        api = CLASH_API,
+        // Без явного пути ядро кладёт кэш в тот каталог, откуда его запустили,
+        // и файл появляется где попало — вплоть до корня репозитория.
+        cache = crate::json::escape(
+            &crate::config::state_dir().join("cache.db").to_string_lossy()
+        )
+        .trim_matches('"')
+        .to_string()
     ))
 }
 
