@@ -11,6 +11,8 @@
 $ErrorActionPreference = 'Stop'
 
 $repo   = 'pepetutu1337/netpult'
+# Ядро выпускается отдельно от пульта: оно большое и меняется редко.
+$coreTag = 'core-1.13.19'
 $binDir = if ($env:NETPULT_BIN_DIR) { $env:NETPULT_BIN_DIR } else { "$env:LOCALAPPDATA\netpult\bin" }
 
 # GitHub из России часто недоступен, а netpult — утилита ровно для этого случая.
@@ -75,7 +77,7 @@ try {
         New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
         Write-Host ''
         Write-Host 'Качаю ядро sing-box (~45 МБ, один раз)...'
-        $coreUrl = "https://github.com/$repo/releases/download/$version/sing-box-windows-x86_64.exe"
+        $coreUrl = "https://github.com/$repo/releases/download/$coreTag/sing-box-windows-x86_64.exe"
         if (Get-Url $coreUrl "$tmp\sing-box.exe") {
             Copy-Item "$tmp\sing-box.exe" (Join-Path $stateDir 'sing-box.exe') -Force
             Write-Host "Ядро: $stateDir\sing-box.exe"

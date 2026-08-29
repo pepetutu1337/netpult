@@ -11,6 +11,8 @@
 set -eu
 
 REPO="pepetutu1337/netpult"
+# Ядро выпускается отдельно от пульта: оно большое и меняется редко.
+CORE_TAG="core-1.13.19"
 BIN_DIR="${NETPULT_BIN_DIR:-$HOME/.local/bin}"
 
 red() { printf '\033[31m%s\033[0m\n' "$1" >&2; }
@@ -114,7 +116,7 @@ if [ -z "${NETPULT_NO_CORE:-}" ]; then
   mkdir -p "$state_dir"
   say ""
   say "Качаю ядро sing-box (~55 МБ, один раз)..."
-  if fetch "https://github.com/$REPO/releases/download/$version/$core_asset" "$tmp/core"; then
+  if fetch "https://github.com/$REPO/releases/download/$CORE_TAG/$core_asset" "$tmp/core"; then
     install -m755 "$tmp/core" "$state_dir/sing-box" 2>/dev/null \
       || { cp "$tmp/core" "$state_dir/sing-box" && chmod 755 "$state_dir/sing-box"; }
     [ "$os" = macos ] && xattr -d com.apple.quarantine "$state_dir/sing-box" 2>/dev/null || true

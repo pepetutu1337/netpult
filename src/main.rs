@@ -143,6 +143,8 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("vpn update", "перечитать подписку"),
         ("vpn sub", "загрузить подписку по ссылке"),
         ("vpn core install", "поставить ядро sing-box"),
+        ("vpn info", "подписка: трафик, срок, страница устройств"),
+        ("vpn hwid", "идентификатор этого устройства для панели"),
         ("vpn log", "журнал ядра"),
         ("tg on", "включить прокси Telegram"),
         ("tg off", "выключить прокси Telegram"),
@@ -258,6 +260,8 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Some(other) => Err(format!("net vpn core install, а не «{other}»")),
         },
+        Some("info") => vpn_info(),
+        Some("hwid") => vpn_hwid(rest.get(1).copied()),
         Some("nodes") | Some("list") => vpn_nodes(cfg),
         Some("use") | Some("select") => {
             let want = rest[1..].join(" ");
@@ -372,6 +376,86 @@ fn vpn_use(want: &str) -> Result<(), String> {
     singbox::select(&found)?;
     println!("{GREEN}Нода: {found}{RESET}");
     Ok(())
+}
+
+/// Что подписка говорит о себе: сколько осталось, до какого числа, где её
+/// страница. Там же список устройств — панель ведёт его у себя, и попасть в
+/// него можно только этой ссылкой.
+fn vpn_info() -> Result<(), String> {
+    let url = sub::saved_url()?;
+    let info = sub::info(&url, Duration::from_secs(20))?;
+    if let Some(title) = &info.title {
+        println!("{BOLD}{title}{RESET}");
+    }
+    let gb = |bytes: u64| bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    if info.total_bytes > 0 {
+        println!(
+            "Трафик: {:.2} ГБ из {:.0} ГБ",
+            gb(info.used_bytes),
+            gb(info.total_bytes)
+        );
+    } else {
+        println!("Трафик: {:.2} ГБ (без ограничения)", gb(info.used_bytes));
+    }
+    match info.expires {
+        Some(stamp) => {
+            let left = stamp - now_seconds();
+            let days = left / 86400;
+            if left > 0 {
+                println!("Осталось дней: {days}");
+            } else {
+                println!("{RED}Срок вышел{RESET}");
+            }
+        }
+        None => println!("Срок: не указан"),
+    }
+    println!("\nЭто устройство: hwid {}", sub::hwid());
+    if let Some(page) = &info.page {
+        println!("Устройства и их удаление — на странице подписки:\n  {page}");
+    }
+    if let Some(support) = &info.support {
+        println!("Поддержка: {support}");
+    }
+    println!(
+        "{DIM}Панель считает каждое приложение отдельным устройством. Чтобы пульт занял\nместо соседа, а не своё: net vpn hwid <его идентификатор>.{RESET}"
+    );
+    Ok(())
+}
+
+/// Показать или сменить идентификатор устройства.
+fn vpn_hwid(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => {
+            println!("{}", sub::hwid());
+            println!("{DIM}Хранится в {}{RESET}", sub::hwid_path().display());
+            println!(
+                "{DIM}Сменить: net vpn hwid <значение>. Новый случайный: net vpn hwid --reset{RESET}"
+            );
+            Ok(())
+        }
+        Some("--reset") | Some("reset") => {
+            let fresh = sub::reset_hwid()?;
+            println!("{GREEN}Новый идентификатор: {fresh}{RESET}");
+            println!(
+                "{YELLOW}Панель посчитает пульт новым устройством и займёт ещё одно место.{RESET}"
+            );
+            Ok(())
+        }
+        Some(other) => {
+            let set = sub::set_hwid(other)?;
+            println!("{GREEN}Идентификатор устройства: {set}{RESET}");
+            println!("{DIM}Перечитай подписку, чтобы панель это увидела: net vpn update{RESET}");
+            Ok(())
+        }
+    }
+}
+
+/// Секунды с начала эпохи — для срока подписки.
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn print_core_status() {
@@ -1145,6 +1229,10 @@ fn print_help() {
   net vpn use          выбрать ноду стрелками
   net vpn use <номер|имя>  выбрать сразу: «net vpn use Турция»
   net vpn auto         выбирать самую быструю самому
+  net vpn info         подписка: трафик, срок, ссылка на устройства
+  net vpn hwid         идентификатор этого устройства
+  net vpn hwid <знач>  занять место другого приложения (тот же hwid)
+  net vpn hwid --reset новый идентификатор — панель сочтёт новым устройством
   net vpn log          журнал ядра
 
 {BOLD}Telegram{RESET} — локальный прокси, без чужих серверов

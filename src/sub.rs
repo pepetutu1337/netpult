@@ -203,6 +203,99 @@ impl Node {
 }
 
 /// Скачать подписку, перебирая личины, пока не разберётся хоть одна нода.
+/// Что подписка рассказывает о себе: имя, трафик, срок, страница с
+/// устройствами. Всё это лежит в заголовках ответа — их и читаем, тела не надо.
+pub struct Info {
+    pub title: Option<String>,
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub expires: Option<i64>,
+    pub page: Option<String>,
+    pub support: Option<String>,
+}
+
+pub fn info(url: &str, timeout: Duration) -> Result<Info, String> {
+    let hwid = hwid();
+    let out = Command::new("curl")
+        .args([
+            "-sSL",
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "-D",
+            "-",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            &timeout.as_secs().to_string(),
+            "-A",
+            AGENTS[0],
+            "-H",
+            &format!("x-hwid: {hwid}"),
+            "-H",
+            &format!("x-device-os: {}", device_os()),
+            "-H",
+            &format!("x-ver-os: {}", os_version()),
+            "-H",
+            "x-device-model: netpult",
+            url,
+        ])
+        .output()
+        .map_err(|e| format!("curl не запустился: {e}"))?;
+    if !out.status.success() {
+        return Err("подписка не ответила".into());
+    }
+    Ok(parse_info(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Разбор заголовков подписки. Вынесено отдельно ради проверок: формат
+/// `subscription-userinfo` описан в договорённостях клиентов, а не в стандарте,
+/// и лишнего доверия не заслуживает.
+pub fn parse_info(headers: &str) -> Info {
+    let mut info = Info {
+        title: None,
+        used_bytes: 0,
+        total_bytes: 0,
+        expires: None,
+        page: None,
+        support: None,
+    };
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "profile-title" => {
+                info.title = Some(match value.strip_prefix("base64:") {
+                    Some(encoded) => base64_decode(encoded)
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .unwrap_or_else(|| value.to_string()),
+                    None => value.to_string(),
+                })
+            }
+            "profile-web-page-url" => info.page = Some(value.to_string()),
+            "support-url" => info.support = Some(value.to_string()),
+            "subscription-userinfo" => {
+                for part in value.split(';') {
+                    let Some((key, number)) = part.split_once('=') else {
+                        continue;
+                    };
+                    let number = number.trim();
+                    match key.trim() {
+                        "upload" => info.used_bytes += number.parse().unwrap_or(0),
+                        "download" => info.used_bytes += number.parse().unwrap_or(0),
+                        "total" => info.total_bytes = number.parse().unwrap_or(0),
+                        "expire" => info.expires = number.parse().ok().filter(|v| *v > 0),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    info
+}
+
 pub fn fetch(url: &str, timeout: Duration) -> Result<Vec<Node>, String> {
     let hwid = hwid();
     let mut last_error = String::from("подписка не ответила");
@@ -273,6 +366,33 @@ fn panel_message(nodes: &[Node]) -> Option<String> {
 /// Постоянный идентификатор устройства. Панель считает по нему слоты, поэтому
 /// он обязан переживать перезапуски: заводится один раз и лежит рядом с
 /// остальным состоянием.
+/// Файл с идентификатором устройства.
+pub fn hwid_path() -> std::path::PathBuf {
+    crate::config::state_dir().join("hwid")
+}
+
+/// Задать свой идентификатор устройства.
+///
+/// Нужно, когда панель считает один компьютер за два: у каждого приложения свой
+/// hwid, и подписка видит Happ и пульт как разные устройства. Поставив пульту
+/// тот же идентификатор, что и у соседа, занимаешь одно место вместо двух.
+pub fn set_hwid(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() < 8 || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("идентификатор — от восьми знаков, буквы, цифры и дефис".into());
+    }
+    crate::config::state_dir_ensure().map_err(|e| e.to_string())?;
+    std::fs::write(hwid_path(), value).map_err(|e| e.to_string())?;
+    Ok(value.to_string())
+}
+
+/// Забыть идентификатор: следующий запрос создаст новый. Панель посчитает это
+/// новым устройством и займёт ещё одно место — поэтому только по просьбе.
+pub fn reset_hwid() -> Result<String, String> {
+    let _ = std::fs::remove_file(hwid_path());
+    Ok(hwid())
+}
+
 pub fn hwid() -> String {
     let path = crate::config::state_dir().join("hwid");
     if let Ok(saved) = std::fs::read_to_string(&path) {
@@ -953,4 +1073,44 @@ pub fn load_nodes() -> Result<Vec<SavedNode>, String> {
 
 pub struct SavedNode {
     pub name: String,
+}
+
+#[cfg(test)]
+mod info_tests {
+    use super::*;
+
+    const HEADERS: &str = "HTTP/2 200\r\n\
+profile-title: base64:0J/QvtC00L/QuNGB0LrQsA==\r\n\
+subscription-userinfo: upload=100; download=900; total=0; expire=1792021685\r\n\
+profile-web-page-url: https://panel.example/sub/abc\r\n\
+support-url: https://t.me/example\r\n";
+
+    #[test]
+    fn заголовки_подписки_разбираются() {
+        let info = parse_info(HEADERS);
+        assert_eq!(info.title.as_deref(), Some("Подписка"));
+        assert_eq!(info.used_bytes, 1000);
+        assert_eq!(info.total_bytes, 0);
+        assert_eq!(info.expires, Some(1792021685));
+        assert_eq!(info.page.as_deref(), Some("https://panel.example/sub/abc"));
+        assert_eq!(info.support.as_deref(), Some("https://t.me/example"));
+    }
+
+    #[test]
+    fn пустой_срок_не_считается_сроком() {
+        let info = parse_info("subscription-userinfo: expire=0\r\n");
+        assert_eq!(info.expires, None);
+    }
+
+    #[test]
+    fn чужие_заголовки_не_мешают() {
+        let info = parse_info("server: nginx\r\ncontent-type: text/plain\r\n");
+        assert!(info.title.is_none() && info.used_bytes == 0);
+    }
+
+    #[test]
+    fn короткий_идентификатор_не_принимается() {
+        assert!(set_hwid("abc").is_err());
+        assert!(set_hwid("плохой id").is_err());
+    }
 }

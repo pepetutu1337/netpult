@@ -411,6 +411,9 @@ fn shell_quote(text: &str) -> String {
 }
 
 /// Имя файла ядра в релизе netpult под текущую систему.
+/// Релиз, в котором лежат сборки ядра.
+pub const CORE_TAG: &str = "core-1.13.19";
+
 fn core_asset() -> &'static str {
     if cfg!(target_os = "macos") {
         "sing-box-macos-universal"
@@ -434,8 +437,11 @@ pub fn install_core() -> Result<PathBuf, String> {
         "sing-box"
     });
     crate::config::state_dir_ensure().map_err(|e| format!("не создать каталог состояния: {e}"))?;
+    // Ядро лежит отдельным релизом и живёт своей жизнью: оно меняется раз в
+    // несколько месяцев, а пульт — часто, и таскать 180 МБ в каждый выпуск
+    // незачем.
     let url = format!(
-        "https://github.com/pepetutu1337/netpult/releases/latest/download/{}",
+        "https://github.com/pepetutu1337/netpult/releases/download/{CORE_TAG}/{}",
         core_asset()
     );
     let mirrors = ["", "https://gh-proxy.com/", "https://ghfast.top/"];
