@@ -1017,6 +1017,11 @@ pub fn status_lines(cfg: &Config) -> Vec<(bool, String)> {
             format!("zapret    ВКЛ    {}", z.strategy().unwrap_or_default()),
         ),
         zapret::State::Off => (false, "zapret    ВЫКЛ".to_string()),
+        // На маке и в Windows свой движок zapret ставится отдельно и пультом
+        // пока не управляется — пугать этим красной строкой незачем.
+        zapret::State::Missing if !cfg!(target_os = "linux") => {
+            (false, "zapret    управляется отдельно (не Linux)".to_string())
+        }
         zapret::State::Missing => (false, "zapret    не установлен".to_string()),
     });
 

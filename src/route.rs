@@ -27,15 +27,19 @@ fn is_tunnel(name: &str) -> bool {
 }
 
 pub fn default_exit() -> Option<Exit> {
-    if cfg!(windows) {
+    // И там и там спрашиваем у системы именно тот маршрут, которым пойдёт
+    // пакет, а не пересказ таблицы: при поднятом туннеле разница
+    // принципиальна.
+    let (program, args, dev_key, gw_key) = if cfg!(target_os = "macos") {
+        ("route", vec!["-n", "get", "1.1.1.1"], "interface:", "gateway:")
+    } else if cfg!(target_os = "linux") {
+        ("ip", vec!["route", "get", "1.1.1.1"], "dev", "via")
+    } else {
+        // На Windows нет ни того, ни другого, а `route print` разбирать ради
+        // одной строки не стоит: остальное в отчёте и без него на месте.
         return None;
-    }
-    // `ip route get` спрашивает у ядра тот самый маршрут, которым пойдёт пакет,
-    // а не пересказывает таблицу — при поднятом туннеле разница принципиальна.
-    let out = Command::new("ip")
-        .args(["route", "get", "1.1.1.1"])
-        .output()
-        .ok()?;
+    };
+    let out = Command::new(program).args(&args).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let word_after = |key: &str| -> Option<String> {
         let mut words = text.split_whitespace();
@@ -47,8 +51,8 @@ pub fn default_exit() -> Option<Exit> {
         None
     };
     Some(Exit {
-        interface: word_after("dev")?,
-        gateway: word_after("via"),
+        interface: word_after(dev_key)?,
+        gateway: word_after(gw_key),
     })
 }
 

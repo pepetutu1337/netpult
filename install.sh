@@ -7,6 +7,7 @@
 #   NETPULT_VERSION=v0.1.0   поставить конкретную версию (по умолчанию последнюю)
 #   NETPULT_BIN_DIR=~/bin    куда класть (по умолчанию ~/.local/bin)
 #   NETPULT_MIRROR=https://...  свой префикс-зеркало для GitHub
+#   NETPULT_NO_CORE=1        не качать ядро sing-box
 set -eu
 
 REPO="pepetutu1337/netpult"
@@ -97,6 +98,31 @@ install -m755 "$tmp/netpult" "$BIN_DIR/netpult" 2>/dev/null \
 [ "$os" = macos ] && xattr -d com.apple.quarantine "$BIN_DIR/netpult" 2>/dev/null || true
 
 say "Готово: $BIN_DIR/netpult"
+
+# Ядро sing-box — половина пульта: без него нет ни туннеля, ни выбора ноды.
+# Качаем сразу, чтобы «поставил и работает» было правдой. Отказаться:
+# NETPULT_NO_CORE=1.
+if [ -z "${NETPULT_NO_CORE:-}" ]; then
+  case "$os" in
+    linux) core_asset="sing-box-linux-x86_64" ;;
+    macos) core_asset="sing-box-macos-universal" ;;
+  esac
+  case "$os" in
+    macos) state_dir="$HOME/Library/Application Support/netpult" ;;
+    *)     state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/netpult" ;;
+  esac
+  mkdir -p "$state_dir"
+  say ""
+  say "Качаю ядро sing-box (~55 МБ, один раз)..."
+  if fetch "https://github.com/$REPO/releases/download/$version/$core_asset" "$tmp/core"; then
+    install -m755 "$tmp/core" "$state_dir/sing-box" 2>/dev/null \
+      || { cp "$tmp/core" "$state_dir/sing-box" && chmod 755 "$state_dir/sing-box"; }
+    [ "$os" = macos ] && xattr -d com.apple.quarantine "$state_dir/sing-box" 2>/dev/null || true
+    say "Ядро: $state_dir/sing-box"
+  else
+    red "ядро не скачалось — поставить потом: netpult vpn core install"
+  fi
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) "$BIN_DIR/netpult" version || true ;;

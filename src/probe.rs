@@ -11,14 +11,73 @@ use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Адрес этой машины в локальной сети.
+/// Адрес этой машины в локальной сети — тот, по которому до неё достучится
+/// телефон.
 ///
-/// Никуда не отправляет ни байта: UDP-сокет без соединения только выбирает
-/// маршрут, а нам нужен его локальный конец. Работает одинаково на всех системах.
+/// Спрашивать маршрут наружу тут нельзя: при поднятом туннеле он приводит к
+/// адресу самого туннеля (172.19.0.1), и пульт выдавал телефону адрес, которого
+/// в его Wi-Fi не существует. Поэтому сначала перебираем адреса интерфейсов и
+/// берём домашний, а трюк с UDP оставлен запасным путём.
 pub fn lan_ip() -> Option<IpAddr> {
+    if let Some(found) = interface_addresses()
+        .into_iter()
+        .filter(|ip| is_home_address(ip))
+        .min_by_key(|ip| home_rank(ip))
+    {
+        return Some(found);
+    }
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("1.1.1.1:80").ok()?;
-    socket.local_addr().ok().map(|a| a.ip())
+    let ip = socket.local_addr().ok().map(|a| a.ip())?;
+    is_home_address(&ip).then_some(ip)
+}
+
+/// Адрес туннеля пульта: он есть в конфиге ядра и домашним не является.
+const OWN_TUNNEL: [u8; 4] = [172, 19, 0, 1];
+
+fn is_home_address(ip: &IpAddr) -> bool {
+    let IpAddr::V4(v4) = ip else { return false };
+    let o = v4.octets();
+    if v4.is_loopback() || v4.is_link_local() || o == OWN_TUNNEL {
+        return false;
+    }
+    v4.is_private()
+}
+
+/// Чем меньше число, тем охотнее берём адрес. Домашние сети почти всегда
+/// 192.168.x, поэтому он первый; 172.16–31 — чаще всего чужие туннели и
+/// контейнеры, поэтому он последний.
+fn home_rank(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => match v4.octets()[0] {
+            192 => 0,
+            10 => 1,
+            _ => 2,
+        },
+        IpAddr::V6(_) => 3,
+    }
+}
+
+/// Адреса всех интерфейсов. Разбираем вывод системной утилиты — ради одного
+/// списка тащить libc и getifaddrs незачем.
+fn interface_addresses() -> Vec<IpAddr> {
+    let output = if cfg!(target_os = "linux") {
+        Command::new("ip").args(["-4", "-o", "addr", "show"]).output()
+    } else if cfg!(target_os = "macos") {
+        Command::new("ifconfig").arg("-a").output()
+    } else {
+        Command::new("ipconfig").output()
+    };
+    let Ok(out) = output else { return Vec::new() };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut found = Vec::new();
+    for word in text.split(|c: char| c.is_whitespace() || c == ':') {
+        let candidate = word.split('/').next().unwrap_or(word);
+        if let Ok(ip) = candidate.parse::<IpAddr>() {
+            found.push(ip);
+        }
+    }
+    found
 }
 
 pub fn curl_available() -> bool {
@@ -140,4 +199,36 @@ pub fn google_speed(timeout: Duration) -> Option<f64> {
         return None;
     }
     Some(bytes / 1024.0 / secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn адрес_туннеля_за_домашний_не_считается() {
+        assert!(!is_home_address(&ip(172, 19, 0, 1)));
+        assert!(!is_home_address(&ip(127, 0, 0, 1)));
+        assert!(!is_home_address(&ip(169, 254, 3, 7)));
+        assert!(!is_home_address(&ip(8, 8, 8, 8)));
+    }
+
+    #[test]
+    fn домашние_адреса_узнаются() {
+        assert!(is_home_address(&ip(192, 168, 1, 213)));
+        assert!(is_home_address(&ip(10, 0, 0, 5)));
+        assert!(is_home_address(&ip(172, 20, 1, 1)));
+    }
+
+    #[test]
+    fn домашний_wifi_важнее_подсети_контейнеров() {
+        let mut all = vec![ip(172, 20, 0, 3), ip(192, 168, 1, 213), ip(10, 1, 2, 3)];
+        all.sort_by_key(home_rank);
+        assert_eq!(all[0], ip(192, 168, 1, 213));
+    }
 }

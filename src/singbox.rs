@@ -124,7 +124,7 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
 
 use crate::config::Config;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Своё ядро вместо клиента: тот же туннель, что поднимает Happ, только
 /// управляемый отсюда.
@@ -171,23 +171,28 @@ impl<'a> Core<'a> {
         }
     }
 
-    /// Поднять туннель. TUN требует прав root — sudo запросит пароль в том же
-    /// окне, поэтому потоки не перехватываются.
+    /// Поднять туннель. TUN требует прав администратора на всех трёх системах:
+    /// Linux и macOS спрашивают пароль через sudo, Windows — своим окном
+    /// «разрешить внести изменения».
     pub fn start(&self) -> Result<(), String> {
         if self.state() == State::Up {
             return Ok(());
         }
         let bin = self.bin()?;
-        // TUN без root не поднять никак: проверяем возможность спросить пароль
-        // до запуска, иначе sudo молча упрётся в невидимый запрос.
-        crate::sudoer::ready()?;
-        println!("Нужны права root — TUN без них не поднять.");
         let config = crate::sub::config_path();
         if !config.exists() {
             return Err("подписка ещё не загружена — net vpn sub <ссылка>".into());
         }
         let log = crate::config::state_dir().join("core.log");
         let pid = self.pid_path();
+        if !cfg!(windows) {
+            // TUN без root не поднять никак: проверяем возможность спросить
+            // пароль до запуска, иначе sudo молча упрётся в невидимый запрос.
+            crate::sudoer::ready()?;
+            println!("Нужны права root — TUN без них не поднять.");
+        } else {
+            println!("Windows спросит разрешение администратора — TUN без него не поднять.");
+        }
         let command = format!(
             "nohup {bin} run -c {config} > {log} 2>&1 & echo $! > {pid}",
             bin = shell_quote(&bin.to_string_lossy()),
@@ -196,14 +201,21 @@ impl<'a> Core<'a> {
             pid = shell_quote(&pid.to_string_lossy()),
         );
         let status = if cfg!(windows) {
-            Command::new(&bin)
-                .args(["run", "-c", &config.to_string_lossy()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map(|_| true)
-                .map_err(|e| format!("ядро не запустилось: {e}"))?
+            // Обычный spawn поднял бы ядро без прав, и оно молча упало бы на
+            // создании адаптера. `-Verb RunAs` показывает то самое окно UAC.
+            let script = format!(
+                "$p = Start-Process -FilePath '{bin}' -ArgumentList 'run','-c','{config}' \
+                 -Verb RunAs -WindowStyle Hidden -PassThru; \
+                 $p.Id | Out-File -Encoding ascii '{pid}'",
+                bin = bin.display(),
+                config = config.display(),
+                pid = pid.display(),
+            );
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .status()
+                .map_err(|e| format!("powershell не запустился: {e}"))?
+                .success()
         } else {
             crate::sudoer::command()
                 .args(["sh", "-c", &command])
@@ -249,7 +261,9 @@ impl<'a> Core<'a> {
     }
 
     pub fn stop(&self) -> Result<(), String> {
-        crate::sudoer::ready()?;
+        if !cfg!(windows) {
+            crate::sudoer::ready()?;
+        }
         let pid_path = self.pid_path();
         let pid = std::fs::read_to_string(&pid_path)
             .ok()
@@ -260,12 +274,20 @@ impl<'a> Core<'a> {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false),
-            _ => Command::new(if cfg!(windows) { "taskkill" } else { "pkill" })
-                .args(if cfg!(windows) {
-                    vec!["/IM", "sing-box.exe", "/F"]
-                } else {
-                    vec!["-f", "sing-box run"]
-                })
+            // Ядро на Windows запущено от администратора, и снять его можно
+            // только тем же правом — снова через окно разрешения.
+            _ if cfg!(windows) => Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "Start-Process taskkill -ArgumentList '/IM','sing-box.exe','/F' \
+                     -Verb RunAs -WindowStyle Hidden -Wait",
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+            _ => Command::new("pkill")
+                .args(["-f", "sing-box run"])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false),

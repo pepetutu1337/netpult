@@ -6,6 +6,7 @@
 #   NETPULT_VERSION=v0.1.0      поставить конкретную версию
 #   NETPULT_BIN_DIR=C:\bin      куда класть
 #   NETPULT_MIRROR=https://...  своё зеркало GitHub
+#   NETPULT_NO_CORE=1           не качать ядро sing-box
 
 $ErrorActionPreference = 'Stop'
 
@@ -66,6 +67,22 @@ try {
     Expand-Archive -Path "$tmp\$asset" -DestinationPath $tmp -Force
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     Copy-Item "$tmp\netpult.exe" (Join-Path $binDir 'netpult.exe') -Force
+
+    # Ядро sing-box — половина пульта: без него нет ни туннеля, ни выбора ноды.
+    # Качаем сразу, чтобы «поставил и работает» было правдой.
+    if (-not $env:NETPULT_NO_CORE) {
+        $stateDir = "$env:LOCALAPPDATA\netpult"
+        New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+        Write-Host ''
+        Write-Host 'Качаю ядро sing-box (~45 МБ, один раз)...'
+        $coreUrl = "https://github.com/$repo/releases/download/$version/sing-box-windows-x86_64.exe"
+        if (Get-Url $coreUrl "$tmp\sing-box.exe") {
+            Copy-Item "$tmp\sing-box.exe" (Join-Path $stateDir 'sing-box.exe') -Force
+            Write-Host "Ядро: $stateDir\sing-box.exe"
+        } else {
+            Write-Warning 'Ядро не скачалось — поставить потом: netpult vpn core install'
+        }
+    }
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
