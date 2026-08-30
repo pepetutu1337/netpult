@@ -21,10 +21,18 @@ fn parse(sample: &str) -> (Vec<String>, String) {
     let sample_path = dir.join("sample");
     std::fs::write(&sample_path, sample).unwrap();
 
+    // curl понимает только косые черты вперёд, а на Windows путь приходит с
+    // обратными. И форма ровно с тремя косыми: в `file://C:/…` кусок до первой
+    // косой — это имя хоста, а не диск.
+    let путь = sample_path.display().to_string().replace('\\', "/");
+    let url = format!("file://{}{путь}", if путь.starts_with('/') { "" } else { "/" });
+
     let out = Command::new(env!("CARGO_BIN_EXE_netpult"))
-        .args(["vpn", "sub", &format!("file://{}", sample_path.display())])
+        .args(["vpn", "sub", &url])
         .env("HOME", &dir)
+        .env("USERPROFILE", &dir)
         .env("XDG_DATA_HOME", dir.join("data"))
+        .env("LOCALAPPDATA", dir.join("data"))
         .output()
         .expect("бинарь не запустился");
     assert!(
@@ -33,7 +41,7 @@ fn parse(sample: &str) -> (Vec<String>, String) {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let state: PathBuf = dir.join("data/netpult");
+    let state: PathBuf = состояние(&dir);
     let names = std::fs::read_to_string(state.join("nodes.list"))
         .unwrap()
         .lines()
@@ -41,6 +49,21 @@ fn parse(sample: &str) -> (Vec<String>, String) {
         .collect();
     let config = std::fs::read_to_string(state.join("singbox.json")).unwrap();
     (names, config)
+}
+
+/// Куда пульт кладёт своё состояние на этой системе. Дублирует `config::state_dir`
+/// нарочно: тест на то и тест, чтобы поймать, если та разъедется с
+/// договорённостью. Каталоги у систем разные, и подставить один общий нельзя —
+/// именно на этом проверка и падала под macOS и Windows, пока гонялась только
+/// под Linux.
+fn состояние(dir: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        dir.join("data/netpult")
+    } else if cfg!(target_os = "macos") {
+        dir.join("Library/Application Support/netpult")
+    } else {
+        dir.join("data/netpult")
+    }
 }
 
 fn base64(text: &str) -> String {
