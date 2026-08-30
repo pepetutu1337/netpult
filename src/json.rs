@@ -248,6 +248,83 @@ impl<'a> Parser<'a> {
 }
 
 /// Экранирование строки для вывода JSON.
+impl Json {
+    /// Обратно в текст. Нужен, чтобы править чужой конфиг точечно: разобрал,
+    /// подменил один список, записал остальное как было.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out, 0);
+        out
+    }
+
+    fn write(&self, out: &mut String, depth: usize) {
+        let pad = |n: usize| "  ".repeat(n);
+        match self {
+            Json::Null => out.push_str("null"),
+            Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Json::Num(n) => {
+                // Целые печатаем без дробной части: порты и таймауты в конфиге
+                // должны остаться целыми, иначе sing-box ругается.
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    let _ = write!(out, "{}", *n as i64);
+                } else {
+                    let _ = write!(out, "{n}");
+                }
+            }
+            Json::Str(s) => out.push_str(&escape(s)),
+            Json::Arr(items) => {
+                if items.is_empty() {
+                    out.push_str("[]");
+                    return;
+                }
+                out.push_str("[\n");
+                for (i, item) in items.iter().enumerate() {
+                    out.push_str(&pad(depth + 1));
+                    item.write(out, depth + 1);
+                    if i + 1 < items.len() {
+                        out.push(',');
+                    }
+                    out.push('\n');
+                }
+                out.push_str(&pad(depth));
+                out.push(']');
+            }
+            Json::Obj(pairs) => {
+                if pairs.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                out.push_str("{\n");
+                for (i, (key, value)) in pairs.iter().enumerate() {
+                    out.push_str(&pad(depth + 1));
+                    out.push_str(&escape(key));
+                    out.push_str(": ");
+                    value.write(out, depth + 1);
+                    if i + 1 < pairs.len() {
+                        out.push(',');
+                    }
+                    out.push('\n');
+                }
+                out.push_str(&pad(depth));
+                out.push('}');
+            }
+        }
+    }
+
+    /// Заменить поле объекта, сохранив порядок остальных.
+    pub fn set(&mut self, key: &str, value: Json) {
+        if let Json::Obj(pairs) = self {
+            for (k, v) in pairs.iter_mut() {
+                if k == key {
+                    *v = value;
+                    return;
+                }
+            }
+            pairs.push((key.to_string(), value));
+        }
+    }
+}
+
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

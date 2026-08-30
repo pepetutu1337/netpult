@@ -13,6 +13,7 @@ mod share;
 mod singbox;
 mod socks;
 mod sub;
+mod sync;
 mod telegram;
 mod tune;
 mod tui;
@@ -140,6 +141,7 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("vpn use", "выбрать ноду стрелками"),
         ("vpn auto", "выбирать самую быструю самому"),
         ("vpn update", "перечитать подписку"),
+        ("vpn sync", "обновить ноды в конфиге ядра на месте"),
         ("vpn sub", "загрузить подписку по ссылке"),
         ("vpn core install", "поставить ядро sing-box"),
         ("vpn info", "подписка: трафик, срок, страница устройств"),
@@ -238,6 +240,53 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             } else {
                 Vpn::new(cfg).close()
             }
+        }
+        // Обновление нод в чужом конфиге sing-box: на роутере ядро подняли
+        // отдельно от пульта, и трогать там можно только список нод.
+        Some("sync") => {
+            let mut plan = sync::Plan::default();
+            let mut args = rest[1..].iter().copied();
+            while let Some(arg) = args.next() {
+                match arg {
+                    "--config" => match args.next() {
+                        Some(path) => plan.config = path.into(),
+                        None => return Err("--config ждёт путь к конфигу".into()),
+                    },
+                    "--binary" => match args.next() {
+                        Some(path) => plan.binary = path.into(),
+                        None => return Err("--binary ждёт путь к sing-box".into()),
+                    },
+                    "--proxy" => match args.next() {
+                        Some(addr) => plan.probe_proxy = addr.to_string(),
+                        None => return Err("--proxy ждёт адрес вида socks5h://127.0.0.1:1180".into()),
+                    },
+                    "--restart" => {
+                        let tail: Vec<String> = args.by_ref().map(str::to_string).collect();
+                        if tail.is_empty() {
+                            return Err("--restart ждёт команду перезапуска ядра".into());
+                        }
+                        plan.restart = tail;
+                    }
+                    "--dry-run" => plan.dry_run = true,
+                    "--fresh-only" => plan.keep_alive = false,
+                    other => return Err(format!("непонятный ключ: {other}")),
+                }
+            }
+            let report = sync::run(&plan)?;
+            if report.rolled_back {
+                println!("{YELLOW}{}{RESET}", report.note);
+                println!("{DIM}прежний конфиг лежит в {}{RESET}", report.backup.display());
+                return Err("обновление откачено".into());
+            }
+            let kept = if report.kept > 0 {
+                format!(" (из них перенесено живых: {})", report.kept)
+            } else {
+                String::new()
+            };
+            println!("{GREEN}{}: {}{kept}{RESET}", report.note, report.nodes);
+            let what = if plan.dry_run { "собранный конфиг" } else { "прежний конфиг" };
+            println!("{DIM}{what}: {}{RESET}", report.backup.display());
+            Ok(())
         }
         Some("sub") | Some("subscription") => {
             let url = rest
