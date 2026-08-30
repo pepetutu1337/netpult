@@ -279,7 +279,7 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 return Err("обновление откачено".into());
             }
             let kept = if report.kept > 0 {
-                format!(" (из них перенесено живых: {})", report.kept)
+                format!(" (из них перенесено прежних: {})", report.kept)
             } else {
                 String::new()
             };

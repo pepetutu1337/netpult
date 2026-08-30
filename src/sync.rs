@@ -56,11 +56,10 @@ fn place_of(outbound: &Json) -> Option<(String, i64)> {
 ///
 /// Возвращает текст конфига и число нод. Ничего не пишет и никуда не ходит —
 /// чистое преобразование, потому и проверяется тестами.
-/// `keep` — теги нод из прежнего конфига, которые проверены и отвечают. Они
-/// остаются в конфиге рядом со свежими: подписка время от времени роняет
-/// рабочие ноды, и терять живое из-за этого не хочется.
 /// Возвращает текст конфига, сколько всего нод вышло и сколько из них
 /// перенесено из прежнего.
+///
+/// `keep` — теги нод прежнего конфига, которые надо сохранить.
 pub fn merge(
     existing: &str,
     nodes: &[Node],
@@ -85,10 +84,13 @@ pub fn merge(
     }
     let new_tags: Vec<String> = fresh.iter().filter_map(tag_of).collect();
 
-    // Живые ноды из прежнего конфига — следом за свежими. Отсеиваем те, что
-    // подписка и так вернула: сравниваем по адресу с портом, потому что имя
-    // у одной и той же ноды может смениться, а уж повторять её в списке
-    // дважды точно ни к чему.
+    // Прежние ноды — следом за свежими. Отсеиваем только те, что подписка и
+    // так вернула: сравниваем по адресу с портом, потому что имя у одной и
+    // той же ноды может смениться, а повторять её в списке дважды ни к чему.
+    //
+    // Отпавшие не выбрасываем намеренно. Нода молчит сегодня и отвечает
+    // завтра — провайдеры их поднимают обратно, а `urltest` мёртвую всё равно
+    // не выберет, так что висеть она никому не мешает.
     let fresh_places: Vec<(String, i64)> = fresh.iter().filter_map(place_of).collect();
     let kept: Vec<Json> = old
         .iter()
@@ -171,7 +173,8 @@ pub struct Plan {
     pub restart: Vec<String>,
     /// Через что проверить, что связь жива: адрес прокси ядра.
     pub probe_proxy: String,
-    /// Оставлять ли в конфиге прежние ноды, которые ещё отвечают.
+    /// Оставлять ли в конфиге прежние ноды. Молчащие тоже остаются: они
+    /// оживают, а `urltest` мёртвую не выберет.
     pub keep_alive: bool,
     /// Только собрать и проверить рядом, ничего не заменяя. Нужен, чтобы
     /// убедиться в правке до того, как она коснётся живого роутера.
@@ -208,10 +211,8 @@ pub fn run(plan: &Plan) -> Result<Report, String> {
     let nodes = sub::fetch(&url, Duration::from_secs(45))?;
     let existing = std::fs::read_to_string(&plan.config)
         .map_err(|e| format!("не прочитать {}: {e}", plan.config.display()))?;
-    // Прежние ноды опрашиваем до замены, пока ядро ещё работает на них.
-    // Отвечающие останутся в конфиге рядом со свежими.
-    let alive_old = if plan.keep_alive { survivors(&existing) } else { Vec::new() };
-    let (merged, count, kept) = merge(&existing, &nodes, &alive_old)?;
+    let previous = if plan.keep_alive { previous_tags(&existing) } else { Vec::new() };
+    let (merged, count, kept) = merge(&existing, &nodes, &previous)?;
 
     // Проверяем рядом, а не на месте: битый конфиг не должен даже на секунду
     // оказаться тем, с чем ядро попробует подняться.
@@ -259,13 +260,13 @@ pub fn run(plan: &Plan) -> Result<Report, String> {
     })
 }
 
-/// Теги нод из конфига, которые сейчас отвечают через ядро.
+/// Теги всех нод, которые уже есть в конфиге.
 ///
-/// Спрашиваем clash API работающего ядра — это то же, чем меряет задержки
-/// экран пульта. Ядро не поднято или API молчит — считаем, что проверить
-/// нечем, и ничего не переносим: лучше взять только свежий список, чем тащить
-/// в новый конфиг заведомо мёртвые ноды.
-fn survivors(existing: &str) -> Vec<String> {
+/// Живость нарочно не проверяется. Раньше тут был прозвон через clash API, и
+/// молчащие ноды отбрасывались — но нода, молчащая сегодня, назавтра обычно
+/// оживает, а прозвон двух десятков нод занимал больше минуты на каждом
+/// запуске.
+fn previous_tags(existing: &str) -> Vec<String> {
     let Ok(config) = Json::parse(existing) else {
         return Vec::new();
     };
@@ -276,7 +277,6 @@ fn survivors(existing: &str) -> Vec<String> {
         .iter()
         .filter(|o| is_node(o))
         .filter_map(tag_of)
-        .filter(|tag| crate::singbox::delay(tag, 2500).is_some())
         .collect()
 }
 
@@ -449,7 +449,7 @@ mod tests {
 
 
     #[test]
-    fn живая_старая_нода_остаётся_рядом_со_свежими() {
+    fn прежняя_нода_остаётся_рядом_со_свежими() {
         let keep = vec!["Старая-2".to_string()];
         let (text, count, kept_count) = merge(РОУТЕР, &[нода("Новая-1", "c.example")], &keep).unwrap();
         assert_eq!(count, 2, "считаем и свежие, и перенесённые");
@@ -476,6 +476,26 @@ mod tests {
             .map(|o| o.arr().iter().filter_map(|e| e.as_str()).collect())
             .unwrap_or_default();
         assert!(list.contains(&"Старая-2".to_string()));
+    }
+
+
+    #[test]
+    fn отпавшие_ноды_не_выбрасываются() {
+        // Живость не проверяем намеренно: молчащая нода назавтра оживает, а
+        // urltest мёртвую всё равно не выберет.
+        let keep = vec!["Старая-1".to_string(), "Старая-2".to_string()];
+        let (text, count, kept_count) =
+            merge(РОУТЕР, &[нода("Новая-1", "c.example")], &keep).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(kept_count, 2);
+        let c = Json::parse(&text).unwrap();
+        let tags: Vec<String> = c
+            .get("outbounds")
+            .map(|o| o.arr().iter().filter_map(tag_of).collect())
+            .unwrap_or_default();
+        for t in ["Новая-1", "Старая-1", "Старая-2"] {
+            assert!(tags.contains(&t.to_string()), "потеряли {t}: {tags:?}");
+        }
     }
 
     #[test]
