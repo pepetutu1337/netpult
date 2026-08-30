@@ -1,6 +1,7 @@
 //! netpult — один пульт для обхода блокировок: zapret, VPN и прокси Telegram.
 
 mod config;
+mod dns;
 mod json;
 mod network;
 mod picker;
@@ -95,6 +96,7 @@ pub fn dispatch_with(
         "profile" | "prof" => profile_command(cfg, &rest),
         "share" => share_command(cfg, &rest),
         "split" => split_command(cfg, &rest),
+        "dns" => dns_command(cfg, &rest),
         "watch" => watch_command(cfg, &rest),
         "qr" => show_qr_maybe_png(cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
@@ -143,6 +145,10 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("restart", "перезапустить zapret"),
         ("strat", "список стратегий обхода"),
         ("tune", "подобрать рабочую стратегию перебором"),
+        ("dns on", "шифрованный DNS для всей системы"),
+        ("dns off", "вернуть DNS своей сети"),
+        ("dns status", "шифруется ли DNS сейчас"),
+        ("dns test", "проверить: куда уходят запросы имён"),
         ("vpn on", "поднять туннель"),
         ("vpn off", "снять туннель"),
         ("vpn nodes", "ноды с задержками"),
@@ -1049,6 +1055,118 @@ fn random_password() -> String {
             ABC[(x as usize) % ABC.len()] as char
         })
         .collect()
+}
+
+/// Шифрованный DNS на всю систему. Отдельно от туннеля: туннель поднят не
+/// всегда, а DNS утекает всегда.
+fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    match rest.first().copied() {
+        None | Some("status") => {
+            dns_status();
+            Ok(())
+        }
+        Some("on") => {
+            println!("Поднимаю свой резолвер...");
+            for шаг in dns::on(cfg)? {
+                println!("  {GREEN}✓{RESET} {шаг}");
+            }
+            println!(
+                "{GREEN}Шифрованный DNS включён{RESET} — теперь его получают все программы, 
+а не только браузер со своей галочкой."
+            );
+            println!("{DIM}Российские зоны идут российским резолвером напрямую: иначе банки,{RESET}");
+            println!("{DIM}прячущие записи от иностранных, перестают открываться.{RESET}");
+            println!("{DIM}Выключить: net dns off{RESET}");
+            Ok(())
+        }
+        Some("off") => {
+            for шаг in dns::off()? {
+                println!("  {шаг}");
+            }
+            println!("{GREEN}Система вернулась к DNS своей сети{RESET}");
+            Ok(())
+        }
+        Some("test") => {
+            dns_test();
+            Ok(())
+        }
+        Some(other) => Err(format!("net dns [on|off|status|test], а не «{other}»")),
+    }
+}
+
+fn dns_status() {
+    let state = dns::state();
+    let hooked = dns::подключён();
+    let (color, text) = match (&state, hooked) {
+        (dns::State::Up, true) => (GREEN, "включён — весь DNS машины шифруется"),
+        (dns::State::Up, false) => (YELLOW, "резолвер работает, но система его не спрашивает"),
+        (dns::State::Broken, _) => (RED, "служба поднята, а резолвер молчит"),
+        (dns::State::Off, true) => (RED, "система направлена на резолвер, а его нет"),
+        (dns::State::Off, false) => (DIM, "выключен"),
+    };
+    println!("{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {color}{text}{RESET}");
+    println!("{DIM}резолвер 127.0.0.1:{} · наружу DoH к 1.1.1.1 · российские зоны напрямую{RESET}",
+        dns::PORT);
+    if state == dns::State::Off && !hooked {
+        println!("{DIM}включить: net dns on{RESET}");
+    }
+}
+
+/// Проверка вживую: спрашивает ли система нас, отвечаем ли мы и куда после
+/// этого ушёл запрос.
+///
+/// Меряться временем тут бесполезно — первая же попытка это показала: кэш
+/// отвечает за ноль миллисекунд, а несуществующее имя в российской зоне
+/// отвечает дольше заграничного. Зато видно соединение на 443 к DoH-серверу
+/// и запрос к российскому резолверу — вот это и есть развилка.
+fn dns_test() {
+    println!("{BOLD}ШИФРОВАННЫЙ DNS — ПРОВЕРКА{RESET}\n");
+
+    let подключена = dns::подключён();
+    отметить(подключена, &format!(
+        "система спрашивает   {}",
+        if подключена {
+            format!("127.0.0.1:{} — это мы", dns::PORT)
+        } else {
+            "DNS своей сети — резолвер не подключён".to_string()
+        }
+    ));
+
+    // Имена со случайной меткой: старое ушло бы в кэш, и запрос наружу не
+    // случился бы вовсе — а нам нужно посмотреть именно на него.
+    let метка = format!("np{}", sub::now_secs() % 100_000);
+    let заграничное = format!("{метка}.example.com");
+    let российское = format!("{метка}.vtb.ru");
+    let живой = dns::ask("127.0.0.1", dns::PORT, "example.com", Duration::from_secs(6));
+    отметить(живой.is_some(), &match &живой {
+        Some(ответ) if !ответ.адреса.is_empty() => format!(
+            "резолвер отвечает    example.com → {} за {} мс",
+            ответ.адреса[0],
+            ответ.заняло.as_millis()
+        ),
+        Some(_) => "резолвер отвечает    но без адресов".to_string(),
+        None => format!("резолвер молчит      на 127.0.0.1:{}", dns::PORT),
+    });
+
+    let _ = dns::ask("127.0.0.1", dns::PORT, &заграничное, Duration::from_secs(6));
+    let _ = dns::ask("127.0.0.1", dns::PORT, &российское, Duration::from_secs(6));
+    let (doh, ru) = dns::каналы();
+    отметить(doh, "канал наружу         1.1.1.1:443 — шифрованный DoH");
+    отметить(ru, "российские зоны      77.88.8.8:53 — напрямую, чтоб банки жили");
+
+    if doh && ru && подключена {
+        println!("\n{GREEN}Всё на месте: DNS машины шифруется, российское ходит своим путём.{RESET}");
+    } else if !подключена {
+        println!("\n{DIM}Включить: net dns on{RESET}");
+    } else {
+        println!("\n{YELLOW}Соединение видно не всё — повтори через секунду,{RESET}");
+        println!("{DIM}сокеты живут недолго и могли уже закрыться.{RESET}");
+    }
+}
+
+fn отметить(ok: bool, text: &str) {
+    let (color, dot) = if ok { (GREEN, "✓") } else { (RED, "✗") };
+    println!("  {color}{dot}{RESET} {text}");
 }
 
 fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
