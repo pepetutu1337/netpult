@@ -206,9 +206,15 @@ pub struct Report {
 }
 
 /// Забрать подписку и обновить ноды на месте.
-pub fn run(plan: &Plan) -> Result<Report, String> {
+/// `phase` вызывается перед каждым отрезком работы. Обновление идёт под
+/// минуту — скачивание подписки, проверка конфига, перезапуск ядра, проба
+/// наружу, — и без отметок непонятно, на чём оно стоит: на медленной сети
+/// или на упавшем ядре.
+pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
     let url = sub::saved_url()?;
+    phase("забираю подписку");
     let nodes = sub::fetch(&url, Duration::from_secs(45))?;
+    phase("собираю конфиг");
     let existing = std::fs::read_to_string(&plan.config)
         .map_err(|e| format!("не прочитать {}: {e}", plan.config.display()))?;
     let previous = if plan.keep_alive { previous_tags(&existing) } else { Vec::new() };
@@ -218,6 +224,7 @@ pub fn run(plan: &Plan) -> Result<Report, String> {
     // оказаться тем, с чем ядро попробует подняться.
     let candidate = plan.config.with_extension("json.new");
     std::fs::write(&candidate, &merged).map_err(|e| format!("не записать проверяемый конфиг: {e}"))?;
+    phase("проверяю конфиг ядром");
     if let Err(e) = check(&plan.binary, &candidate) {
         let _ = std::fs::remove_file(&candidate);
         return Err(e);
@@ -236,7 +243,9 @@ pub fn run(plan: &Plan) -> Result<Report, String> {
     std::fs::copy(&plan.config, &backup).map_err(|e| format!("не сделать бэкап: {e}"))?;
     std::fs::rename(&candidate, &plan.config).map_err(|e| format!("не заменить конфиг: {e}"))?;
 
+    phase("перезапускаю ядро");
     restart(&plan.restart)?;
+    phase("проверяю связь наружу");
     if alive(&plan.probe_proxy) {
         return Ok(Report {
             nodes: count,
@@ -249,6 +258,7 @@ pub fn run(plan: &Plan) -> Result<Report, String> {
 
     // Наружу не достучались — возвращаем прежний конфиг и поднимаем ядро
     // обратно. Лучше вчерашние ноды, чем никаких.
+    phase("связи нет — откатываюсь");
     std::fs::copy(&backup, &plan.config).map_err(|e| format!("откат не удался: {e}"))?;
     restart(&plan.restart)?;
     Ok(Report {

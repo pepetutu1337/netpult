@@ -29,7 +29,9 @@
 
 Вывод команды печатается тут же, построчно по мере появления, — возвращаться
 клавишей неоткуда. Долгие дела (замер задержек, подбор стратегии) идут в
-стороне и не морозят экран.
+стороне и не морозят экран, и всё это время видно, что именно проверяется
+сейчас и сколько осталось: замер двух десятков нод занимает под минуту, и
+молчание в это время читается как зависание.
 
 Пока строка пустая, стрелки ходят по нодам, Enter включает выбранную, `p`
 меряет задержки, `r` обновляет состояние, `q` выходит.
@@ -265,6 +267,55 @@ curl -fsSL https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.s
 ```powershell
 irm https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.ps1 | iex
 ```
+
+Ставит бинарь в `~/.local/bin` и сразу докачивает ядро sing-box — после этого
+`net vpn on` уже поднимает туннель, ничего доставлять не надо.
+
+Команда не скачалась — значит, GitHub режут ровно так, как netpult и лечит.
+То же через зеркало:
+
+```sh
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.sh | sh
+```
+
+```powershell
+irm https://gh-proxy.com/https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.ps1 | iex
+```
+
+Сам установщик дальше тоже ходит через зеркала, так что достаточно, чтобы
+скачался он один. Своё зеркало — `NETPULT_MIRROR=https://…/`.
+
+<details>
+<summary>Если GitHub не отдаёт вообще — поставить с флешки</summary>
+
+Замкнутый круг: пульт лечит доступ к сети, а качается из той самой сети.
+Зеркала спасают маленький установщик, но ядро — восемьдесят мегабайт, и через
+них оно идёт по паре сотен байт в секунду, то есть никак.
+
+Выход простой: скачать файлы на машине, где сеть в порядке, и принести.
+
+На рабочей машине (подставь свою систему: `macos-universal`,
+`linux-x86_64`, `windows-x86_64`):
+
+```sh
+v=v0.3.3
+curl -fLO https://github.com/pepetutu1337/netpult/releases/download/$v/netpult-macos-universal.tar.gz
+curl -fLO https://github.com/pepetutu1337/netpult/releases/download/core-1.13.19/sing-box-macos-universal
+```
+
+Оба файла — на флешку. На той машине:
+
+```sh
+curl -fsSL .../install.sh -o install.sh   # или тоже принести файлом
+NETPULT_ASSET=./netpult-macos-universal.tar.gz \
+NETPULT_CORE=./sing-box-macos-universal \
+  sh install.sh
+```
+
+Ничего не качается, всё берётся из принесённых файлов: и метка карантина
+снимается, и ядро кладётся куда надо.
+
+</details>
 
 Скрипт сам определит систему, скачает нужную сборку, сверит контрольную сумму и
 положит бинарь в `~/.local/bin` (на Windows — в `%LOCALAPPDATA%\netpult\bin`,

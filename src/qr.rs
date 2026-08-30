@@ -6,6 +6,17 @@
 //! Сверен с libqrencode: при одной и той же маске матрица совпадает модуль в
 //! модуль (см. `tests/qr_vectors.rs`).
 
+// Матрица QR обходится по координатам: и стандарт, и все разборы алгоритма
+// написаны через индексы строк и столбцов. Перевод на итераторы сделал бы код
+// непохожим на источник, по которому его проверяют, — а проверять его придётся
+// (кодировщик сверяется с libqrencode модуль в модуль).
+#![allow(clippy::needless_range_loop)]
+// Условия исключения совмещённых модулей выписаны по стандарту, по одному на
+// строку: «6/6», «6/крайний», «крайний/6». Свёрнутые в минимальную форму, они
+// перестают читаться как список из стандарта, а сверять их приходится именно
+// с ним.
+#![allow(clippy::nonminimal_bool)]
+
 /// Вместимость в байтах для версий 1..=10 на уровне L.
 const CAPACITY: [usize; 10] = [17, 32, 53, 78, 106, 134, 154, 192, 230, 271];
 
@@ -254,7 +265,7 @@ fn place_function_patterns(m: &mut Vec<Vec<Option<u8>>>, size: usize, version: u
     }
 }
 
-fn place_data(m: &mut Vec<Vec<Option<u8>>>, size: usize, codewords: &[u8]) {
+fn place_data(m: &mut [Vec<Option<u8>>], size: usize, codewords: &[u8]) {
     let mut bits: Vec<u8> = Vec::with_capacity(codewords.len() * 8);
     for &cw in codewords {
         for i in (0..8).rev() {
@@ -389,7 +400,7 @@ fn penalty(grid: &[Vec<u8>], size: usize) -> usize {
     score
 }
 
-fn apply_format(grid: &mut Vec<Vec<u8>>, size: usize, mask_id: usize) {
+fn apply_format(grid: &mut [Vec<u8>], size: usize, mask_id: usize) {
     let fmt = (0b01u32 << 3) | mask_id as u32; // 0b01 — уровень коррекции L
     let bits = ((fmt << 10) | bch(fmt << 10, 0x537, 10)) ^ 0x5412;
 

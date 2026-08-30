@@ -4,6 +4,7 @@ mod config;
 mod json;
 mod picker;
 mod probe;
+mod progress;
 mod profile;
 mod split;
 mod sudoer;
@@ -275,7 +276,18 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                     other => return Err(format!("непонятный ключ: {other}")),
                 }
             }
-            let report = sync::run(&plan)?;
+            // Шесть отрезков: подписка, сборка, проверка, бэкап с заменой,
+            // перезапуск, проба наружу. Седьмой (откат) считается запасным.
+            let mut ход = progress::Progress::new("обновляю", 6).logged();
+            let report = {
+                let ход = &mut ход;
+                sync::run(&plan, &mut |что| {
+                    ход.step(что);
+                    ход.tick();
+                })
+            };
+            ход.clear();
+            let report = report?;
             if report.rolled_back {
                 println!("{YELLOW}{}{RESET}", report.note);
                 println!("{DIM}прежний конфиг лежит в {}{RESET}", report.backup.display());
@@ -369,15 +381,20 @@ fn vpn_nodes(cfg: &Config) -> Result<(), String> {
         return Ok(());
     }
     let current = singbox::current_node();
-    println!("Меряю задержки...");
+    let mut ход = progress::Progress::new("меряю", names.len());
+    let mut живых = 0;
+    let mut сумма = 0u32;
     for (i, name) in names.iter().enumerate() {
+        ход.step(name);
         let mark = if current.as_deref() == Some(name.as_str()) {
             "●"
         } else {
             " "
         };
-        match singbox::delay(name, 3000) {
+        let строка = match singbox::delay(name, 3000) {
             Some(ms) => {
+                живых += 1;
+                сумма += ms;
                 let color = if ms < 300 {
                     GREEN
                 } else if ms < 800 {
@@ -385,13 +402,26 @@ fn vpn_nodes(cfg: &Config) -> Result<(), String> {
                 } else {
                     RED
                 };
-                println!("{:>3}. {mark} {name} — {color}{ms} мс{RESET}", i + 1);
+                format!("{:>3}. {mark} {name} — {color}{ms} мс{RESET}", i + 1)
             }
-            None => println!("{:>3}. {mark} {name} — {RED}не отвечает{RESET}", i + 1),
-        }
+            None => format!("{:>3}. {mark} {name} — {RED}не отвечает{RESET}", i + 1),
+        };
+        ход.line(&строка);
+        ход.tick();
+    }
+    let заняло = ход.длительность();
+    ход.finish();
+    println!();
+    if let Some(среднее) = сумма.checked_div(живых) {
+        println!(
+            "{DIM}отвечает {живых} из {}, в среднем {среднее} мс · прогон занял {заняло}{RESET}",
+            names.len()
+        );
+    } else {
+        println!("{RED}не ответила ни одна нода{RESET}");
     }
     if let Some(now) = current {
-        println!("\nсейчас: {now}");
+        println!("сейчас: {now}");
     }
     Ok(())
 }
@@ -402,23 +432,24 @@ fn vpn_pick(cfg: &Config) -> Result<(), String> {
     let names: Vec<String> = sub::load_nodes()?.into_iter().map(|n| n.name).collect();
     let up = singbox::Core::new(cfg).state() == singbox::State::Up;
     let current = if up { singbox::current_node() } else { None };
-    if up {
-        println!("Меряю задержки...");
-    }
+    let mut ход = progress::Progress::new("меряю", if up { names.len() } else { 0 });
     let items: Vec<picker::Item> = names
         .iter()
         .map(|name| {
             let mut item = picker::Item::new(name.clone())
                 .current(current.as_deref() == Some(name.as_str()));
             if up {
+                ход.step(name);
                 item = item.hint(match singbox::delay(name, 3000) {
                     Some(ms) => format!("{ms} мс"),
                     None => "не отвечает".to_string(),
                 });
+                ход.tick();
             }
             item
         })
         .collect();
+    ход.clear();
     match picker::choose("НОДЫ", &items)? {
         Some(index) => vpn_use(&names[index]),
         None => Ok(()),
@@ -634,12 +665,17 @@ fn vpn_subscribe(url: &str) -> Result<(), String> {
     let mut revived = 0;
     if !dropped.is_empty() {
         println!("Проверяю {} нод, которых больше нет в подписке…", dropped.len());
+        let mut ход = progress::Progress::new("проверяю", dropped.len());
         for kept in &dropped {
+            ход.step(&kept.node.name);
             if sub::responds(&kept.node, Duration::from_secs(3)) {
+                ход.line(&format!("  {GREEN}живая{RESET} {}", kept.node.name));
                 nodes.push(kept.node.clone());
                 revived += 1;
             }
+            ход.tick();
         }
+        ход.finish();
     }
 
     sub::dedupe_names(&mut nodes);
@@ -1424,24 +1460,32 @@ pub fn run_test_public(cfg: &Config) {
         return;
     }
     println!("Доступность:");
+    // Шесть отрезков: четыре адреса, видео-CDN и скорость. Каждый — до
+    // десятка секунд, так что без бегущей строки проверка выглядит зависшей.
+    let mut ход = progress::Progress::new("проверяю", 6);
     for (label, url) in [
         ("youtube.com ", "https://www.youtube.com/generate_204"),
         ("ytimg (превью)", "https://i.ytimg.com/generate_204"),
         ("discord.com ", "https://discord.com/api/v9/gateway"),
         ("telegram.org", "https://web.telegram.org/"),
     ] {
+        ход.step(label.trim());
         let ok = probe::reachable(url, Duration::from_secs(10));
         let (color, verdict) = if ok {
             (GREEN, "открывается")
         } else {
             (RED, "НЕ открывается")
         };
-        println!("{color}  {label} — {verdict}{RESET}");
+        ход.line(&format!("{color}  {label} — {verdict}{RESET}"));
+        ход.tick();
     }
 
     // Отдельно и последним — то, ради чего всё затевается. Страница и превью
     // открываются даже со сломанным обходом, а видео при этом не идёт.
+    ход.step("видео-CDN");
     let video = probe::video(Duration::from_secs(10));
+    ход.tick();
+    ход.clear();
     if !video.checked {
         println!("{DIM}  видео-CDN   — сервер для проверки не нашёлся{RESET}");
     } else {
@@ -1467,7 +1511,11 @@ pub fn run_test_public(cfg: &Config) {
         println!("{GREEN}  прокси TGLock — слушает порт {}{RESET}", cfg.tg_port);
     }
 
-    match probe::google_speed(Duration::from_secs(20)) {
+    ход.step("скорость");
+    let скорость = probe::google_speed(Duration::from_secs(20));
+    ход.tick();
+    ход.finish();
+    match скорость {
         Some(kbs) => println!("Скорость с серверов Google: {kbs:.0} КБ/с"),
         None => println!("Скорость с серверов Google: не измерилась"),
     }

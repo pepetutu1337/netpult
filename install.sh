@@ -3,11 +3,19 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.sh | sh
 #
+# Если сам этот файл не скачивается — то же через зеркало:
+#   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.sh | sh
+#
 # Переменные:
 #   NETPULT_VERSION=v0.1.0   поставить конкретную версию (по умолчанию последнюю)
 #   NETPULT_BIN_DIR=~/bin    куда класть (по умолчанию ~/.local/bin)
 #   NETPULT_MIRROR=https://...  свой префикс-зеркало для GitHub
 #   NETPULT_NO_CORE=1        не качать ядро sing-box
+#   NETPULT_ASSET=./netpult-macos-universal.tar.gz   поставить из готового файла
+#   NETPULT_CORE=./sing-box                          ядро тоже из файла
+#
+# Последние два — для машины, которой GitHub не отдаёт вообще. Файлы качаются
+# на любой рабочей машине (или берутся с флешки) и подкладываются сюда.
 set -eu
 
 REPO="pepetutu1337/netpult"
@@ -27,7 +35,9 @@ fetch() { # fetch <url> <выходной файл|-> ; перебирает з�
   # --speed-time: соединение, которое установилось и встало, обрывается через
   # двадцать секунд молчания. Без этого первая же мёртвая попытка съедала весь
   # запас времени, и до зеркал очередь не доходила.
-  for _m in ${NETPULT_MIRROR:-} "" https://ghproxy.net/ https://gh-proxy.com/ https://ghfast.top/; do
+  # ghproxy.net из списка убран: отдаёт сертификат на чужое имя, curl рвёт
+  # соединение (ошибка 60) и восемь секунд ожидания уходят впустую.
+  for _m in ${NETPULT_MIRROR:-} "" https://gh-proxy.com/ https://ghfast.top/; do
     if [ "$_out" = "-" ]; then
       curl -fsL --connect-timeout 8 --max-time 30 --speed-time 15 --speed-limit 512 \
         "$_m$_url" && return 0
@@ -56,6 +66,39 @@ case "$os:$arch" in
     die "готового бинаря под Linux ARM нет. Собери из исходников: cargo build --release" ;;
   *) die "неизвестная связка $os/$arch" ;;
 esac
+
+# Готовый файл под рукой — качать нечего.
+if [ -n "${NETPULT_ASSET:-}" ]; then
+  [ -f "$NETPULT_ASSET" ] || die "нет файла $NETPULT_ASSET"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  tar xzf "$NETPULT_ASSET" -C "$tmp" || die "$NETPULT_ASSET — не тот архив"
+  mkdir -p "$BIN_DIR"
+  install -m755 "$tmp/netpult" "$BIN_DIR/netpult" 2>/dev/null \
+    || { cp "$tmp/netpult" "$BIN_DIR/netpult" && chmod 755 "$BIN_DIR/netpult"; }
+  [ "$os" = macos ] && xattr -d com.apple.quarantine "$BIN_DIR/netpult" 2>/dev/null || true
+  say "Готово: $BIN_DIR/netpult"
+  case "$os" in
+    macos) state_dir="$HOME/Library/Application Support/netpult" ;;
+    *)     state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/netpult" ;;
+  esac
+  if [ -n "${NETPULT_CORE:-}" ]; then
+    [ -f "$NETPULT_CORE" ] || die "нет файла $NETPULT_CORE"
+    mkdir -p "$state_dir"
+    install -m755 "$NETPULT_CORE" "$state_dir/sing-box" 2>/dev/null \
+      || { cp "$NETPULT_CORE" "$state_dir/sing-box" && chmod 755 "$state_dir/sing-box"; }
+    [ "$os" = macos ] && xattr -d com.apple.quarantine "$state_dir/sing-box" 2>/dev/null || true
+    say "Ядро: $state_dir/sing-box"
+  else
+    say "Ядро не подложено — поставить потом: netpult vpn core install"
+  fi
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) "$BIN_DIR/netpult" version || true ;;
+    *) say ""; say "$BIN_DIR не в PATH. Добавь в ~/.bashrc или ~/.zshrc:"
+       say "  export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  esac
+  exit 0
+fi
 
 version="${NETPULT_VERSION:-}"
 if [ -z "$version" ]; then

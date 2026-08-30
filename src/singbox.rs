@@ -235,12 +235,15 @@ impl<'a> Core<'a> {
         let mut said = 0;
         while started.elapsed() < limit {
             if self.state() == State::Up {
+                crate::progress::дождались();
                 println!("Туннель поднят за {:.0} с", started.elapsed().as_secs_f32());
                 // Автоподбор до первого замера держит первую ноду списка —
                 // живая она или мёртвая, ему пока неоткуда знать. Гоним замер
                 // сразу, иначе первые минуты трафик идёт наугад.
                 println!("Проверяю ноды, чтобы автоподбор выбрал живую...");
+                crate::progress::ждём("прозваниваю ноды", 0);
                 measure_group(AUTO, 5000);
+                crate::progress::дождались();
                 if let Some((name, _)) = active_node() {
                     println!("Нода: {name}");
                 }
@@ -250,12 +253,14 @@ impl<'a> Core<'a> {
             if seconds > said {
                 said = seconds;
                 if seconds == 3 {
+                    crate::progress::дождались();
                     println!("  списки правил тянутся при первом запуске, это разово");
                 }
-                println!("  жду... {seconds} с");
+                crate::progress::ждём("поднимаю туннель", seconds);
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        crate::progress::дождались();
         Err("ядро не открыло API за минуту — смотри net vpn log".into())
     }
 

@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::probe;
+use crate::progress::Progress;
 use crate::zapret::{State, Zapret};
 use crate::{DIM, GREEN, RED, RESET, YELLOW};
 use std::time::Duration;
@@ -66,7 +67,13 @@ impl Default for Options {
 const SWITCH_MARGIN: f64 = 1.5;
 
 /// Проверяет одну стратегию: ставит, перезапускает движок, замеряет.
-fn measure(z: &Zapret, name: &str) -> Result<Score, String> {
+///
+/// Одна стратегия проверяется под минуту: перезапуск, две сетевые пробы и два
+/// замера скорости. `phase` вызывается перед каждым отрезком, чтобы наверху
+/// было видно, на чём именно пульт стоит, — иначе минута тишины на каждую из
+/// десятка стратегий читается как зависший перебор.
+fn measure(z: &Zapret, name: &str, phase: &mut dyn FnMut(&str)) -> Result<Score, String> {
+    phase("перезапускаю обход");
     z.set_strategy(name)?;
     if z.state() != State::On {
         z.start()?;
@@ -76,17 +83,23 @@ fn measure(z: &Zapret, name: &str) -> Result<Score, String> {
     // Движку нужно мгновение, чтобы поднять правила фаервола.
     std::thread::sleep(Duration::from_millis(1500));
 
+    phase("открываю страницу");
     let reachable = probe::reachable(
         "https://www.youtube.com/generate_204",
         Duration::from_secs(8),
     );
     // Страница ютуба открывается и со сломанным обходом — решает видео-CDN.
+    phase("стучусь в видео-CDN");
     let video = probe::video(Duration::from_secs(8));
 
     // Два замера, берём лучший: холодный старт соединения занижает первый.
-    let speed = (0..2)
-        .filter_map(|_| probe::google_speed(Duration::from_secs(15)))
-        .fold(0.0_f64, f64::max);
+    let mut speed = 0.0_f64;
+    for попытка in 1..=2 {
+        phase(&format!("меряю скорость ({попытка} из 2)"));
+        if let Some(v) = probe::google_speed(Duration::from_secs(15)) {
+            speed = speed.max(v);
+        }
+    }
 
     Ok(Score { strategy: name.to_string(), reachable, video, speed })
 }
@@ -113,14 +126,16 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
     order.extend(all.into_iter().filter(|s| Some(s) != current.as_ref()));
 
     let mut results: Vec<Score> = Vec::new();
+    let всего = order.len();
+    let mut ход = Progress::new("перебираю", if options.verbose { всего } else { 0 }).logged();
     for name in &order {
-        if options.verbose {
-            print!("  {name} … ");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-        }
-
-        let score = measure(&z, name)?;
+        let подпись = name.clone();
+        let score = {
+            let ход = &mut ход;
+            measure(&z, name, &mut |что| {
+                ход.step(&format!("{подпись} — {что}"));
+            })?
+        };
         if options.verbose {
             let mark = match (score.reachable, score.video.plain) {
                 (true, true) => format!("{GREEN}видео идёт{RESET}"),
@@ -132,18 +147,23 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
                 Some(false) => format!("  {YELLOW}только консоль{RESET}"),
                 None => String::new(),
             };
-            println!("{mark}{browser}  {:.0} КБ/с", score.speed);
+            ход.line(&format!(
+                "  {name} … {mark}{browser}  {:.0} КБ/с",
+                score.speed
+            ));
         }
+        ход.tick();
 
         let good = score.full() && score.speed >= GOOD_ENOUGH_KBS;
         results.push(score);
         if good && !options.full {
             if options.verbose {
-                println!("{DIM}  хватит: стратегия рабочая и быстрая{RESET}");
+                ход.line(&format!("{DIM}  хватит: стратегия рабочая и быстрая{RESET}"));
             }
             break;
         }
     }
+    ход.finish();
 
     let best = results
         .iter()

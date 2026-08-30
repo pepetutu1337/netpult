@@ -2,6 +2,9 @@
 #
 #   irm https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.ps1 | iex
 #
+# Если сам этот файл не скачивается — то же через зеркало:
+#   irm https://gh-proxy.com/https://raw.githubusercontent.com/pepetutu1337/netpult/main/install.ps1 | iex
+#
 # Переменные окружения:
 #   NETPULT_VERSION=v0.1.0      поставить конкретную версию
 #   NETPULT_BIN_DIR=C:\bin      куда класть
@@ -19,7 +22,8 @@ $binDir = if ($env:NETPULT_BIN_DIR) { $env:NETPULT_BIN_DIR } else { "$env:LOCALA
 # Каждая ссылка пробуется напрямую, потом через зеркала.
 $mirrors = @()
 if ($env:NETPULT_MIRROR) { $mirrors += $env:NETPULT_MIRROR }
-$mirrors += @('', 'https://ghproxy.net/', 'https://gh-proxy.com/', 'https://ghfast.top/')
+# ghproxy.net убран: отдаёт сертификат на чужое имя, соединение рвётся.
+$mirrors += @('', 'https://gh-proxy.com/', 'https://ghfast.top/')
 
 function Get-Url($url, $outFile) {
     foreach ($m in $mirrors) {

@@ -577,7 +577,6 @@ fn hand_over(line: &str) -> (bool, String) {
 
 /// Дополнить до ширины по видимым знакам. Обычное форматирование считает
 /// байты, а флаги стран занимают их по четыре штуки — столбец разъезжается.
-
 fn strip_colors(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars();
