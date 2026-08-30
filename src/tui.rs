@@ -10,8 +10,9 @@
 
 use crate::config::Config;
 use crate::singbox;
+use crate::picker::{clip, fit, pad};
 use crate::sub;
-use crate::{status_lines, BOLD, DIM, GREEN, RED, RESET, YELLOW};
+use crate::{status_lines, Status, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::terminal;
 use std::io::{BufRead, Write};
@@ -29,6 +30,18 @@ const SUGGEST_ROWS_MIN: usize = 4;
 
 /// Наименьшее место под ноды, если окно совсем низкое.
 const NODE_ROWS_MIN: usize = 5;
+
+/// Сколько колонок занимает всё, что стоит правее имени в строке ноды:
+/// отступ 2, маркеры «выбрано» и «текущая» с пробелами 4, полоска задержки 8,
+/// число «1234 мс» 7, плюс два пробела-разделителя. Считается по строке, а не
+/// прикидывается на глаз — раньше тут стояло 26 без объяснения, и колонка
+/// имени была на три знака уже, чем могла быть.
+const NODE_TAIL: usize = 2 + 4 + 8 + 7 + 2;
+
+/// Сколько нод оставляем на виду, пока набирают команду: список команд в этот
+/// момент главнее, и отдавать ему нижние две строки экрана — значит прятать
+/// то, на что человек прямо сейчас смотрит.
+const NODE_ROWS_BUSY: usize = 8;
 
 /// Весточка из рабочего потока.
 enum Work {
@@ -49,7 +62,9 @@ struct Node {
 }
 
 struct Screen {
-    status: Vec<(bool, String)>,
+    status: Vec<Status>,
+    /// Чем сейчас держится связь: готовый ответ для первой строки экрана.
+    carrier: (bool, String),
     status_taken: Instant,
     current_taken: Instant,
     nodes: Vec<Node>,
@@ -71,6 +86,7 @@ struct Screen {
 pub fn run(cfg: &Config) -> Result<(), String> {
     let mut screen = Screen {
         status: status_lines(cfg),
+        carrier: crate::route::carrier(cfg),
         status_taken: Instant::now(),
         current_taken: Instant::now(),
         nodes: load_nodes(),
@@ -140,6 +156,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                         }
                     screen.message = Some((ok, text));
                     screen.status = status_lines(cfg);
+                    screen.carrier = crate::route::carrier(cfg);
                     screen.status_taken = Instant::now();
                     screen.nodes = merge_nodes(screen.nodes);
                     screen.current = singbox::active_node();
@@ -148,6 +165,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         }
         if screen.status_taken.elapsed() > Duration::from_secs(10) && screen.busy.is_none() {
             screen.status = status_lines(cfg);
+            screen.carrier = crate::route::carrier(cfg);
             screen.status_taken = Instant::now();
         }
         // Автоподбор переставляет ноду сам, без нашего ведома: спрашиваем, кто
@@ -221,6 +239,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                 }
                 KeyCode::Char('r') | KeyCode::Char('к') => {
                     screen.status = status_lines(cfg);
+                    screen.carrier = crate::route::carrier(cfg);
                     screen.status_taken = Instant::now();
                     screen.nodes = load_nodes();
                     screen.current = singbox::active_node();
@@ -558,26 +577,6 @@ fn hand_over(line: &str) -> (bool, String) {
 
 /// Дополнить до ширины по видимым знакам. Обычное форматирование считает
 /// байты, а флаги стран занимают их по четыре штуки — столбец разъезжается.
-fn pad(text: &str, width: usize) -> String {
-    let visible = text.chars().count();
-    if visible >= width {
-        return text.to_string();
-    }
-    format!("{text}{}", " ".repeat(width - visible))
-}
-
-/// Ровно по ширине: короткое дополняется, длинное подрезается с многоточием.
-/// Без подрезки длинное имя ноды выталкивало задержку за край окна и строка
-/// переносилась, ломая весь кадр.
-fn fit(text: &str, width: usize) -> String {
-    let visible = text.chars().count();
-    if visible <= width {
-        return pad(text, width);
-    }
-    let keep = width.saturating_sub(1);
-    let cut: String = text.chars().take(keep).collect();
-    format!("{cut}…")
-}
 
 fn strip_colors(text: &str) -> String {
     let mut out = String::new();
@@ -695,6 +694,13 @@ fn with_arguments(typed: &str) -> bool {
         .any(|(name, _)| name.split_whitespace().next() == Some(first))
 }
 
+/// Тонкая черта во всю ширину. Блоки на экране разделены пустыми строками, и
+/// на прозрачном терминале, где сквозь текст просвечивает картинка, границы
+/// блоков теряются совсем. Черта их держит и стоит одну строку.
+fn rule(width: usize) -> String {
+    format!("  {DIM}{}{RESET}", "─".repeat(width.saturating_sub(4)))
+}
+
 /// Короткая сводка по нодам в шапку: сколько замерено, сколько живо, какая
 /// самая быстрая. Пока ничего не мерено — молчим, пустые цифры не нужны.
 fn node_summary(screen: &Screen) -> String {
@@ -750,10 +756,29 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
 
     let mut rows: Vec<String> = Vec::new();
     rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}{}", node_summary(screen)));
+    rows.push(rule(width));
+    // Ответ на главный вопрос экрана — первой строкой и не тусклым. Раньше его
+    // приходилось складывать в голове из трёх равноправных строк состояния.
+    let (carrier_ok, carrier) = &screen.carrier;
+    let carrier_color = if *carrier_ok { GREEN } else { YELLOW };
+    rows.push(format!("  {DIM}Трафик{RESET}  {carrier_color}{carrier}{RESET}"));
     rows.push(String::new());
-    for (ok, text) in &screen.status {
-        let (color, dot) = if *ok { (GREEN, "●") } else { (RED, "○") };
-        rows.push(format!("  {color}{dot} {text}{RESET}"));
+
+    // Колонки состояния выравниваются здесь, а не пробелами внутри строк:
+    // ширина зависит от того, какие службы вообще подняты.
+    let name_width = crate::status_name_width(&screen.status);
+    for s in &screen.status {
+        let (color, dot) = if s.ok { (GREEN, "●") } else { (RED, "○") };
+        let name = pad(s.name, name_width);
+        let state = pad(&s.state, 4);
+        if s.detail.is_empty() {
+            rows.push(format!("  {color}{dot}{RESET} {name}  {color}{state}{RESET}"));
+        } else {
+            rows.push(format!(
+                "  {color}{dot}{RESET} {name}  {color}{state}{RESET}  {}",
+                s.detail
+            ));
+        }
     }
     rows.push(String::new());
 
@@ -768,11 +793,26 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     } else {
         OUTPUT_ROWS.min(screen.output.len())
     };
-    let suggest_rows = suggestions
-        .len()
-        .clamp(SUGGEST_ROWS_MIN, SUGGEST_ROWS_MAX);
-    let fixed = rows.len() + output_rows + suggest_rows + 4;
-    let room = height.saturating_sub(fixed).max(NODE_ROWS_MIN);
+    // Пустая строка ввода — показывать нечего, и держать под это четыре
+    // строки незачем: они складывались с пустотой под списком нод в широкую
+    // мёртвую полосу над строкой ввода.
+    let suggest_rows = if suggestions.is_empty() && screen.input.trim().is_empty() {
+        1
+    } else {
+        suggestions.len().clamp(SUGGEST_ROWS_MIN, SUGGEST_ROWS_MAX)
+    };
+    let fixed = rows.len() + output_rows + suggest_rows + 5;
+    // Место забирает то, чем сейчас заняты. Пока строка пуста, экран про ноды
+    // — список во всю высоту. Как только набирают команду, главное на экране
+    // это список команд, и ноды ужимаются до нескольких строк, чтобы он не
+    // жался к нижнему краю.
+    let room = if screen.input.trim().is_empty() {
+        height.saturating_sub(fixed).max(NODE_ROWS_MIN)
+    } else {
+        height
+            .saturating_sub(fixed)
+            .clamp(NODE_ROWS_MIN, NODE_ROWS_BUSY)
+    };
 
     if screen.nodes.is_empty() {
         rows.push(format!(
@@ -787,8 +827,16 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
             Some((name, false)) => name.clone(),
             None => "не выбрана".to_string(),
         };
+        // Пока задержки не мерены, «p — замерить» и есть то, что тут надо
+        // сделать: говорим это словами, а не прочерками в каждой строке.
+        let unmeasured = screen.nodes.iter().all(|n| n.delay.is_none());
+        let hint = if unmeasured {
+            format!("{YELLOW}p — замерить задержки{RESET}")
+        } else {
+            format!("{DIM}↑↓ выбор · Enter включить · p замерить{RESET}")
+        };
         rows.push(format!(
-            "  {DIM}НОДЫ{RESET} {GREEN}{here}{RESET}  {DIM}{}/{} · ↑↓ выбор · Enter включить · p замерить{RESET}",
+            "  {DIM}НОДЫ{RESET} {GREEN}{here}{RESET}  {}/{}  {hint}",
             screen.node_at + 1,
             screen.nodes.len()
         ));
@@ -812,7 +860,10 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
                 " ".to_string()
             };
             let delay = match node.delay {
-                None => format!("{DIM}—{RESET}"),
+                // Незамеренное молчит и на экране. Двадцать два прочерка
+                // столбиком не сообщают ничего, а занимают половину окна и
+                // читаются как список поломок.
+                None => String::new(),
                 Some(None) => format!("{RED}молчит{RESET}"),
                 Some(Some(ms)) => {
                     let color = if ms < 300 {
@@ -830,15 +881,24 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
             // Имена занимают всю ширину, какая есть: на широком окне «Нидерланды
             // 2 (Амстердам)» больше не обрезается до неузнаваемости, на узком
             // колонка ужимается сама.
-            let name_width = width.saturating_sub(26).clamp(16, 42);
-            let name = fit(&node.name, name_width);
-            if selected {
-                rows.push(format!("  {GREEN}▸{RESET} {mark} {name} {delay}"));
+            let name_width = width.saturating_sub(NODE_TAIL).clamp(16, 42);
+            let name = if delay.is_empty() {
+                clip(&node.name, name_width)
             } else {
-                rows.push(format!("    {mark} {name} {delay}"));
+                fit(&node.name, name_width)
+            };
+            if selected {
+                rows.push(format!("  {GREEN}▸{RESET} {mark} {GREEN}{name}{RESET} {delay}"));
+            } else {
+                // Двадцать строк в полную яркость перебивали шапку состояния,
+                // хотя список — второй шаг, а не первый.
+                rows.push(format!("    {mark} {DIM}{name}{RESET} {delay}"));
             }
         }
-        for _ in shown..room {
+        // Список не растягиваем пустыми строками до отведённой высоты: три
+        // пустые строки под последней нодой читаются как обрыв, а не как
+        // пауза. Недобранное место просто уходит нижним блокам.
+        for _ in shown..room.min(screen.nodes.len()) {
             rows.push(String::new());
         }
     }
@@ -857,44 +917,38 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
         rows.push(String::new());
     }
 
+    // Черта отделяет то, что набирают, от того, что показывают: строка ввода
+    // и её подсказки — единственная часть экрана, которая отвечает на нажатия.
+    rows.push(rule(width));
+
     if !suggestions.is_empty() {
-        // Окно листается вместе с выбором, иначе до нижних команд не дойти.
-        // Последняя строка отдана счётчику, поэтому под сами команды на одну
-        // меньше — иначе панель вылезает за отведённое и кадр съезжает.
+        // Шапка блока — как у списка нод: счётчик и клавиши сверху, а не под
+        // списком. Один и тот же смысл в двух местах экрана сбивал с толку.
         let shown = suggest_rows.saturating_sub(1).min(suggestions.len());
+        rows.push(format!(
+            "  {DIM}КОМАНДЫ{RESET}  {}/{}  {DIM}↑↓ или Tab листать · Enter выполнить{RESET}",
+            screen.suggestion_at + 1,
+            suggestions.len()
+        ));
+        // Окно листается вместе с выбором, иначе до нижних команд не дойти.
         let first = screen
             .suggestion_at
             .saturating_sub(shown / 2)
             .min(suggestions.len() - shown);
-        let name_width = suggestions
-            .iter()
-            .skip(first)
-            .take(shown)
-            .map(|s| s.label.chars().count())
-            .max()
-            .unwrap_or(0)
-            .clamp(8, 24);
+        // Ширина колонки считается так же, как у нод: от ширины окна, а не от
+        // самой длинной видимой строки. Иначе колонка прыгала при листании.
+        let name_width = width.saturating_sub(NODE_TAIL).clamp(16, 42);
         for (offset, item) in suggestions.iter().skip(first).take(shown).enumerate() {
             let index = first + offset;
-            let label = pad(&item.label, name_width);
+            let label = fit(&item.label, name_width.min(24));
+            // Описание тоже режем по ширине: без этого длинная строка
+            // переносится, и высота блока перестаёт сходиться с расчётной.
+            let about = clip(&item.about, width.saturating_sub(name_width.min(24) + 8));
             if index == screen.suggestion_at {
-                rows.push(format!(
-                    "  {GREEN}▸ {label}{RESET}  {DIM}{}{RESET}",
-                    item.about
-                ));
+                rows.push(format!("  {GREEN}▸ {label}{RESET}  {about}"));
             } else {
-                rows.push(format!("    {label}  {DIM}{}{RESET}", item.about));
+                rows.push(format!("    {label}  {DIM}{about}{RESET}"));
             }
-        }
-        // Признак, что список длиннее окна: без него кажется, что это всё.
-        if suggestions.len() > shown {
-            rows.push(format!(
-                "  {DIM}{}/{} · ↑↓ или Tab листать · Enter выполнить{RESET}",
-                screen.suggestion_at + 1,
-                suggestions.len()
-            ));
-        } else {
-            rows.push(String::new());
         }
         for _ in shown + 1..suggest_rows {
             rows.push(String::new());
@@ -908,9 +962,6 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
         rows.push(format!(
             "  {DIM}набирай команду — покажу похожие · q — выход · r — обновить{RESET}"
         ));
-        for _ in 1..suggest_rows {
-            rows.push(String::new());
-        }
     }
 
     rows.push(match (&screen.busy, &screen.message) {
@@ -925,7 +976,9 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
             )
         }
         (None, Some((ok, text))) => {
-            let color = if *ok { GREEN } else { YELLOW };
+            // Красный тут и значит «не вышло». Жёлтый остаётся за
+            // предупреждением и подсказкой — двум смыслам один цвет не дают.
+            let color = if *ok { GREEN } else { RED };
             format!("  {color}{text}{RESET}")
         }
         _ => String::new(),
@@ -992,5 +1045,13 @@ mod tests {
     fn длинное_имя_подрезается_под_ширину() {
         assert_eq!(fit("Нидерланды 2", 6).chars().count(), 6);
         assert_eq!(fit("США", 8).chars().count(), 8);
+    }
+
+    #[test]
+    fn последняя_колонка_не_добивается_пробелами() {
+        // clip режет длинное, но короткое оставляет как есть — за ним ничего
+        // нет, и хвост из пробелов там ни к чему.
+        assert_eq!(clip("США", 8), "США");
+        assert_eq!(clip("Нидерланды 2", 6).chars().count(), 6);
     }
 }

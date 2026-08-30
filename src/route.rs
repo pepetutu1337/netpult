@@ -150,6 +150,33 @@ const BLOCKED: [(&str, &str); 3] = [
     ("discord.com", "https://discord.com/api/v9/gateway"),
 ];
 
+/// Одной строкой: чем именно сейчас держится связь.
+///
+/// Экран открывают ради этого ответа, а раньше его приходилось складывать
+/// в голове из трёх равноправных строк состояния. Проверки тут дешёвые —
+/// маршрут у системы и состояние своих служб, без единого запроса в сеть,
+/// поэтому строку не жалко пересчитывать при каждой перерисовке.
+pub fn carrier(cfg: &Config) -> (bool, String) {
+    let zapret_on = Zapret::new(cfg).state() == zapret::State::On;
+    let tunnel_on = singbox::Core::new(cfg).state() == singbox::State::Up;
+    let exit = default_exit();
+    let through_tunnel = exit.as_ref().is_some_and(|e| is_tunnel(&e.interface));
+
+    // Порядок проверок — по силе: туннель забирает маршрут целиком и делает
+    // остальное неважным, дальше идёт zapret, и только потом «никак».
+    match (through_tunnel, tunnel_on, zapret_on) {
+        (true, _, _) => {
+            let name = exit.map(|e| e.interface).unwrap_or_default();
+            (true, format!("через туннель {name}"))
+        }
+        // Ядро поднято, а маршрут мимо него: так бывает при сплите, когда в
+        // туннель уходят только выбранные домены.
+        (false, true, _) => (true, "туннель поднят, маршрут мимо — сплит".to_string()),
+        (false, false, true) => (true, "напрямую, обход zapret".to_string()),
+        (false, false, false) => (false, "напрямую, без обхода".to_string()),
+    }
+}
+
 pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
     let z = Zapret::new(cfg);
     let zapret_on = z.state() == zapret::State::On;
