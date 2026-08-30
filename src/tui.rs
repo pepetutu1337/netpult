@@ -21,6 +21,12 @@ use std::time::{Duration, Instant};
 /// Сколько строк вывода команды показывать.
 const OUTPUT_ROWS: usize = 8;
 
+/// Сколько строк отдаём похожим командам. Раньше их было ровно четыре, и это
+/// молча обрезало список: набранное имя пульта показывает все команды разом,
+/// а из них было видно четыре штуки без всякого признака, что есть ещё.
+const SUGGEST_ROWS_MAX: usize = 9;
+const SUGGEST_ROWS_MIN: usize = 4;
+
 /// Наименьшее место под ноды, если окно совсем низкое.
 const NODE_ROWS_MIN: usize = 5;
 
@@ -119,8 +125,8 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                     screen.running = None;
                     // Пароль спрашиваем не заранее, а по надобности: там, где
                     // хватает polkit, лишний запрос только раздражает.
-                    if !ok && text.contains(crate::sudoer::NEED_PASSWORD) {
-                        if let Some(again) = screen.last.clone() {
+                    if !ok && text.contains(crate::sudoer::NEED_PASSWORD)
+                        && let Some(again) = screen.last.clone() {
                             match ask_password(&again) {
                                 Ok(()) => {
                                     start_command(&mut screen, sender.clone(), &again);
@@ -132,7 +138,6 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                                 }
                             }
                         }
-                    }
                     screen.message = Some((ok, text));
                     screen.status = status_lines(cfg);
                     screen.status_taken = Instant::now();
@@ -561,6 +566,19 @@ fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width - visible))
 }
 
+/// Ровно по ширине: короткое дополняется, длинное подрезается с многоточием.
+/// Без подрезки длинное имя ноды выталкивало задержку за край окна и строка
+/// переносилась, ломая весь кадр.
+fn fit(text: &str, width: usize) -> String {
+    let visible = text.chars().count();
+    if visible <= width {
+        return pad(text, width);
+    }
+    let keep = width.saturating_sub(1);
+    let cut: String = text.chars().take(keep).collect();
+    format!("{cut}…")
+}
+
 fn strip_colors(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars();
@@ -595,7 +613,19 @@ fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
     let typed = strip_own_name(input);
     let typed = typed.as_str();
     if typed.is_empty() {
-        return Vec::new();
+        // Пустая строка — чистый экран. Но если набрано имя пульта и от него
+        // ничего не осталось, человек ждёт список команд, а не пустоту.
+        if input.trim().is_empty() {
+            return Vec::new();
+        }
+        return items
+            .iter()
+            .map(|item| Suggestion {
+                line: item.label.clone(),
+                label: item.label.clone(),
+                about: item.hint.clone().unwrap_or_default(),
+            })
+            .collect();
     }
     if let Some(url) = find_url(typed) {
         return vec![Suggestion {
@@ -629,10 +659,18 @@ fn suggest(items: &[crate::picker::Item], input: &str) -> Vec<Suggestion> {
 
 /// Внутри пульта имя пульта писать незачем, но рука набирает его по привычке —
 /// молча срезаем, иначе «net vpn nodes» не совпадёт ни с чем.
+///
+/// Одно голое имя тоже срезаем, в пустую строку. Раньше «net» уходил в поиск
+/// как обычное слово и совпадал по буквам n→e→t ровно с одной командой,
+/// `vpn core install`: человек набирал «net», ждал список, получал бессмыслицу
+/// и вынужден был дописывать «net o», чтобы увидеть `off`.
 pub fn strip_own_name(input: &str) -> String {
     let typed = input.trim();
-    for name in ["netpult ", "net "] {
-        if let Some(rest) = typed.strip_prefix(name) {
+    for name in ["netpult", "net"] {
+        if typed == name {
+            return String::new();
+        }
+        if let Some(rest) = typed.strip_prefix(&format!("{name} ")) {
             return rest.trim().to_string();
         }
     }
@@ -657,11 +695,61 @@ fn with_arguments(typed: &str) -> bool {
         .any(|(name, _)| name.split_whitespace().next() == Some(first))
 }
 
+/// Короткая сводка по нодам в шапку: сколько замерено, сколько живо, какая
+/// самая быстрая. Пока ничего не мерено — молчим, пустые цифры не нужны.
+fn node_summary(screen: &Screen) -> String {
+    let measured: Vec<Option<u32>> = screen.nodes.iter().filter_map(|n| n.delay).collect();
+    if measured.is_empty() {
+        return String::new();
+    }
+    let alive = measured.iter().filter(|d| d.is_some()).count();
+    let best = measured.iter().flatten().min();
+    let tail = match best {
+        Some(ms) => format!(" · лучшая {ms} мс"),
+        None => String::new(),
+    };
+    format!(
+        "  {DIM}живых {alive}/{}{tail}{RESET}",
+        screen.nodes.len()
+    )
+}
+
+/// Полоска качества связи: чем короче задержка, тем длиннее. Восемь знаков —
+/// достаточно, чтобы разница читалась боковым зрением, и не настолько широко,
+/// чтобы теснить имена.
+fn delay_bar(ms: u32) -> String {
+    const WIDTH: usize = 8;
+    let filled = match ms {
+        0..=99 => 8,
+        100..=199 => 7,
+        200..=299 => 6,
+        300..=449 => 5,
+        450..=649 => 4,
+        650..=899 => 3,
+        900..=1399 => 2,
+        _ => 1,
+    };
+    let color = if ms < 300 {
+        GREEN
+    } else if ms < 800 {
+        YELLOW
+    } else {
+        RED
+    };
+    format!(
+        "{color}{}{RESET}{DIM}{}{RESET}",
+        "█".repeat(filled),
+        "·".repeat(WIDTH - filled)
+    )
+}
+
 fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     // Кадр печатается поверх прежнего, строка затирает строку: без очистки
     // экрана нет мигания.
+    let width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(48);
+
     let mut rows: Vec<String> = Vec::new();
-    rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}"));
+    rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}{}", node_summary(screen)));
     rows.push(String::new());
     for (ok, text) in &screen.status {
         let (color, dot) = if *ok { (GREEN, "●") } else { (RED, "○") };
@@ -680,7 +768,10 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     } else {
         OUTPUT_ROWS.min(screen.output.len())
     };
-    let fixed = rows.len() + output_rows + 8;
+    let suggest_rows = suggestions
+        .len()
+        .clamp(SUGGEST_ROWS_MIN, SUGGEST_ROWS_MAX);
+    let fixed = rows.len() + output_rows + suggest_rows + 4;
     let room = height.saturating_sub(fixed).max(NODE_ROWS_MIN);
 
     if screen.nodes.is_empty() {
@@ -731,10 +822,16 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
                     } else {
                         RED
                     };
-                    format!("{color}{ms} мс{RESET}")
+                    // Полоска слева от числа: глазу хватает её одной, число
+                    // нужно, только когда ноды близки.
+                    format!("{} {color}{}{RESET}", delay_bar(ms), pad(&format!("{ms} мс"), 7))
                 }
             };
-            let name = pad(&node.name, 26);
+            // Имена занимают всю ширину, какая есть: на широком окне «Нидерланды
+            // 2 (Амстердам)» больше не обрезается до неузнаваемости, на узком
+            // колонка ужимается сама.
+            let name_width = width.saturating_sub(26).clamp(16, 42);
+            let name = fit(&node.name, name_width);
             if selected {
                 rows.push(format!("  {GREEN}▸{RESET} {mark} {name} {delay}"));
             } else {
@@ -761,29 +858,57 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     }
 
     if !suggestions.is_empty() {
-        for (row, item) in suggestions.iter().take(4).enumerate() {
-            if row == screen.suggestion_at.min(3) {
+        // Окно листается вместе с выбором, иначе до нижних команд не дойти.
+        // Последняя строка отдана счётчику, поэтому под сами команды на одну
+        // меньше — иначе панель вылезает за отведённое и кадр съезжает.
+        let shown = suggest_rows.saturating_sub(1).min(suggestions.len());
+        let first = screen
+            .suggestion_at
+            .saturating_sub(shown / 2)
+            .min(suggestions.len() - shown);
+        let name_width = suggestions
+            .iter()
+            .skip(first)
+            .take(shown)
+            .map(|s| s.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(8, 24);
+        for (offset, item) in suggestions.iter().skip(first).take(shown).enumerate() {
+            let index = first + offset;
+            let label = pad(&item.label, name_width);
+            if index == screen.suggestion_at {
                 rows.push(format!(
-                    "  {GREEN}▸ {}{RESET}  {DIM}{}{RESET}",
-                    item.label, item.about
+                    "  {GREEN}▸ {label}{RESET}  {DIM}{}{RESET}",
+                    item.about
                 ));
             } else {
-                rows.push(format!("    {}  {DIM}{}{RESET}", item.label, item.about));
+                rows.push(format!("    {label}  {DIM}{}{RESET}", item.about));
             }
         }
-        for _ in suggestions.len()..4 {
+        // Признак, что список длиннее окна: без него кажется, что это всё.
+        if suggestions.len() > shown {
+            rows.push(format!(
+                "  {DIM}{}/{} · ↑↓ или Tab листать · Enter выполнить{RESET}",
+                screen.suggestion_at + 1,
+                suggestions.len()
+            ));
+        } else {
+            rows.push(String::new());
+        }
+        for _ in shown + 1..suggest_rows {
             rows.push(String::new());
         }
     } else if !screen.input.trim().is_empty() {
         rows.push(format!("  {YELLOW}похожих команд нет{RESET}"));
-        for _ in 0..3 {
+        for _ in 1..suggest_rows {
             rows.push(String::new());
         }
     } else {
         rows.push(format!(
             "  {DIM}набирай команду — покажу похожие · q — выход · r — обновить{RESET}"
         ));
-        for _ in 0..3 {
+        for _ in 1..suggest_rows {
             rows.push(String::new());
         }
     }
@@ -815,4 +940,57 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     frame.push_str(&format!("  {BOLD}›{RESET} {}▏\x1b[K\x1b[J", screen.input));
     print!("{frame}");
     std::io::stdout().flush().ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::picker::Item;
+
+    fn команды() -> Vec<Item> {
+        crate::commands()
+            .iter()
+            .map(|(name, about)| Item::new(*name).hint(*about))
+            .collect()
+    }
+
+    #[test]
+    fn имя_пульта_целиком_срезается() {
+        assert_eq!(strip_own_name("net"), "");
+        assert_eq!(strip_own_name("netpult"), "");
+        assert_eq!(strip_own_name("  net  "), "");
+        assert_eq!(strip_own_name("net off"), "off");
+        assert_eq!(strip_own_name("net vpn nodes"), "vpn nodes");
+    }
+
+    #[test]
+    fn набранное_имя_пульта_показывает_все_команды() {
+        // Раньше «net» уходил в поиск обычным словом и совпадал по буквам
+        // n→e→t ровно с одной командой, `vpn core install`.
+        let items = команды();
+        let found = suggest(&items, "net");
+        assert_eq!(found.len(), items.len(), "показаны не все команды");
+        assert!(
+            found.iter().any(|s| s.line == "off"),
+            "«off» должна быть в списке сразу после «net»"
+        );
+    }
+
+    #[test]
+    fn пустая_строка_ничего_не_предлагает() {
+        assert!(suggest(&команды(), "").is_empty());
+        assert!(suggest(&команды(), "   ").is_empty());
+    }
+
+    #[test]
+    fn имя_пульта_с_командой_ищет_команду() {
+        let found = suggest(&команды(), "net off");
+        assert_eq!(found[0].line, "off");
+    }
+
+    #[test]
+    fn длинное_имя_подрезается_под_ширину() {
+        assert_eq!(fit("Нидерланды 2", 6).chars().count(), 6);
+        assert_eq!(fit("США", 8).chars().count(), 8);
+    }
 }

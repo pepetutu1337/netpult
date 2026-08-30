@@ -63,7 +63,6 @@ pub fn dispatch_with(
     rest: &[&str],
     palette: bool,
 ) -> Result<(), String> {
-    let cfg = cfg;
     let rest = rest.to_vec();
     match command {
         "tui" | "menu" | "" => tui::run(cfg),
@@ -1172,7 +1171,7 @@ pub fn run_test_public(cfg: &Config) {
     println!("Доступность:");
     for (label, url) in [
         ("youtube.com ", "https://www.youtube.com/generate_204"),
-        ("ytimg (CDN) ", "https://i.ytimg.com/generate_204"),
+        ("ytimg (превью)", "https://i.ytimg.com/generate_204"),
         ("discord.com ", "https://discord.com/api/v9/gateway"),
         ("telegram.org", "https://web.telegram.org/"),
     ] {
@@ -1183,6 +1182,30 @@ pub fn run_test_public(cfg: &Config) {
             (RED, "НЕ открывается")
         };
         println!("{color}  {label} — {verdict}{RESET}");
+    }
+
+    // Отдельно и последним — то, ради чего всё затевается. Страница и превью
+    // открываются даже со сломанным обходом, а видео при этом не идёт.
+    let video = probe::video(Duration::from_secs(10));
+    if !video.checked {
+        println!("{DIM}  видео-CDN   — сервер для проверки не нашёлся{RESET}");
+    } else {
+        let (color, verdict) = if video.plain {
+            (GREEN, "идёт")
+        } else {
+            (RED, "МОЛЧИТ")
+        };
+        println!("{color}  видео-CDN   — {verdict}{RESET}");
+        match video.browser {
+            Some(true) => println!("{GREEN}  то же браузерным приветствием TLS — идёт{RESET}"),
+            Some(false) => {
+                println!("{YELLOW}  то же браузерным приветствием TLS — МОЛЧИТ{RESET}");
+                println!(
+                    "{DIM}  Вот так и выглядит «в консоли всё есть, а в браузере ютуб не грузится»:\n  браузер шлёт приветствие на два килобайта, DPI его собирает и режет.{RESET}"
+                );
+            }
+            None => {}
+        }
     }
 
     if Telegram::new(cfg).running() {

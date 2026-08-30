@@ -143,13 +143,32 @@ pub fn filter(items: &[Item], query: &str) -> Vec<usize> {
 /// Оценка совпадения: буквы запроса должны встретиться в имени по порядку.
 /// Подряд идущие и стоящие в начале слова ценятся выше — так «гер» уверенно
 /// поднимает «Германию» над случайным совпадением букв.
+///
+/// Поверх этого — крупные надбавки за начало строки и за начало слова. Без них
+/// набранное целиком слово тонуло среди разбросанных совпадений: «off» ровно
+/// так проигрывал команде `vpn core install`, где те же буквы просто нашлись
+/// по порядку в разных местах.
 fn score(label: &str, query: &str) -> Option<i32> {
     let haystack: Vec<char> = label.to_lowercase().chars().collect();
     let needle: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if needle.is_empty() {
         return Some(0);
     }
+    // Для надбавок берём запрос как набран, с пробелами: «vpn off» должно
+    // узнаваться целиком, а не превращаться в «vpnoff», которого ни в одной
+    // команде нет.
+    let whole = query.trim().to_lowercase();
+    let text: String = haystack.iter().collect();
     let mut score = 0;
+    if !whole.is_empty() {
+        if text.starts_with(&whole) {
+            score += 100;
+        } else if text.split_whitespace().any(|word| word.starts_with(&whole)) {
+            score += 60;
+        } else if text.contains(&whole) {
+            score += 30;
+        }
+    }
     let mut at = 0usize;
     let mut previous: Option<usize> = None;
     for want in needle {
@@ -252,6 +271,22 @@ mod tests {
     fn пустой_запрос_оставляет_всё() {
         let list = items(&["a", "b", "c"]);
         assert_eq!(filter(&list, "").len(), 3);
+    }
+
+    #[test]
+    fn целое_слово_бьёт_разбросанные_буквы() {
+        // «off» лежит в `vpn core install` подпоследовательностью o…f…f и
+        // раньше обгонял команду, которая так и называется.
+        let list = items(&["vpn core install", "off"]);
+        let found = filter(&list, "off");
+        assert_eq!(list[found[0]].label, "off");
+    }
+
+    #[test]
+    fn запрос_с_пробелом_узнаётся_целиком() {
+        let list = items(&["vpn update", "vpn off"]);
+        let found = filter(&list, "vpn off");
+        assert_eq!(list[found[0]].label, "vpn off");
     }
 
     #[test]
