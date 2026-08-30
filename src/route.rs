@@ -97,11 +97,10 @@ fn foreign_tunnels(cfg: &Config) -> Vec<String> {
 
 fn system_proxy() -> Option<String> {
     for key in ["all_proxy", "https_proxy", "http_proxy", "ALL_PROXY", "HTTPS_PROXY"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty() {
                 return Some(format!("{key}={value}"));
             }
-        }
     }
     None
 }
@@ -117,11 +116,10 @@ fn nameservers() -> Vec<String> {
         .collect();
     // 127.0.0.53 — это заглушка systemd-resolved, а не настоящий сервер: за
     // ней стоит либо роутер, либо DoH, и разница тут как раз важна.
-    if listed.iter().all(|ip| ip.starts_with("127.")) {
-        if let Some(real) = resolved_upstream() {
+    if listed.iter().all(|ip| ip.starts_with("127."))
+        && let Some(real) = resolved_upstream() {
             return real;
         }
-    }
     listed
 }
 
@@ -151,6 +149,33 @@ const BLOCKED: [(&str, &str); 3] = [
     ("ytimg (CDN)", "https://i.ytimg.com/generate_204"),
     ("discord.com", "https://discord.com/api/v9/gateway"),
 ];
+
+/// Одной строкой: чем именно сейчас держится связь.
+///
+/// Экран открывают ради этого ответа, а раньше его приходилось складывать
+/// в голове из трёх равноправных строк состояния. Проверки тут дешёвые —
+/// маршрут у системы и состояние своих служб, без единого запроса в сеть,
+/// поэтому строку не жалко пересчитывать при каждой перерисовке.
+pub fn carrier(cfg: &Config) -> (bool, String) {
+    let zapret_on = Zapret::new(cfg).state() == zapret::State::On;
+    let tunnel_on = singbox::Core::new(cfg).state() == singbox::State::Up;
+    let exit = default_exit();
+    let through_tunnel = exit.as_ref().is_some_and(|e| is_tunnel(&e.interface));
+
+    // Порядок проверок — по силе: туннель забирает маршрут целиком и делает
+    // остальное неважным, дальше идёт zapret, и только потом «никак».
+    match (through_tunnel, tunnel_on, zapret_on) {
+        (true, _, _) => {
+            let name = exit.map(|e| e.interface).unwrap_or_default();
+            (true, format!("через туннель {name}"))
+        }
+        // Ядро поднято, а маршрут мимо него: так бывает при сплите, когда в
+        // туннель уходят только выбранные домены.
+        (false, true, _) => (true, "туннель поднят, маршрут мимо — сплит".to_string()),
+        (false, false, true) => (true, "напрямую, обход zapret".to_string()),
+        (false, false, false) => (false, "напрямую, без обхода".to_string()),
+    }
+}
 
 pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
     let z = Zapret::new(cfg);
@@ -314,14 +339,13 @@ fn conflicts(
                 .to_string(),
         );
     }
-    if let Some(exit) = exit {
-        if tunnel_on && !is_tunnel(&exit.interface) {
+    if let Some(exit) = exit
+        && tunnel_on && !is_tunnel(&exit.interface) {
             out.push(format!(
                 "туннель поднят, но трафик уходит через {} — маршрут он на себя не забрал",
                 exit.interface
             ));
         }
-    }
     out
 }
 

@@ -76,15 +76,14 @@ pub fn note(text: &str) {
     let line = format!("[{}] {text}\n", stamp());
     print!("{line}");
     std::io::stdout().flush().ok();
-    if std::fs::create_dir_all(state_dir()).is_ok() {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+    if std::fs::create_dir_all(state_dir()).is_ok()
+        && let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path())
         {
             file.write_all(line.as_bytes()).ok();
         }
-    }
 }
 
 /// Показывает всплывающее уведомление на рабочем столе, если есть чем.

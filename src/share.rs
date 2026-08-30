@@ -83,11 +83,10 @@ pub fn serve(port: u16, password: Option<&str>) -> Result<(), String> {
         let auth = Arc::clone(&auth);
         std::thread::spawn(move || {
             stats.connections.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = handle(client, &auth) {
-                if std::env::var_os("NETPULT_DEBUG").is_some() {
+            if let Err(e) = handle(client, &auth)
+                && std::env::var_os("NETPULT_DEBUG").is_some() {
                     eprintln!("соединение оборвалось: {e}");
                 }
-            }
         });
     }
     Ok(())

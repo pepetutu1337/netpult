@@ -143,13 +143,32 @@ pub fn filter(items: &[Item], query: &str) -> Vec<usize> {
 /// Оценка совпадения: буквы запроса должны встретиться в имени по порядку.
 /// Подряд идущие и стоящие в начале слова ценятся выше — так «гер» уверенно
 /// поднимает «Германию» над случайным совпадением букв.
+///
+/// Поверх этого — крупные надбавки за начало строки и за начало слова. Без них
+/// набранное целиком слово тонуло среди разбросанных совпадений: «off» ровно
+/// так проигрывал команде `vpn core install`, где те же буквы просто нашлись
+/// по порядку в разных местах.
 fn score(label: &str, query: &str) -> Option<i32> {
     let haystack: Vec<char> = label.to_lowercase().chars().collect();
     let needle: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if needle.is_empty() {
         return Some(0);
     }
+    // Для надбавок берём запрос как набран, с пробелами: «vpn off» должно
+    // узнаваться целиком, а не превращаться в «vpnoff», которого ни в одной
+    // команде нет.
+    let whole = query.trim().to_lowercase();
+    let text: String = haystack.iter().collect();
     let mut score = 0;
+    if !whole.is_empty() {
+        if text.starts_with(&whole) {
+            score += 100;
+        } else if text.split_whitespace().any(|word| word.starts_with(&whole)) {
+            score += 60;
+        } else if text.contains(&whole) {
+            score += 30;
+        }
+    }
     let mut at = 0usize;
     let mut previous: Option<usize> = None;
     for want in needle {
@@ -167,46 +186,111 @@ fn score(label: &str, query: &str) -> Option<i32> {
     Some(score)
 }
 
+/// Дополнить до ширины пробелами.
+pub fn pad(text: &str, width: usize) -> String {
+    let visible = text.chars().count();
+    if visible >= width {
+        return text.to_string();
+    }
+    format!("{text}{}", " ".repeat(width - visible))
+}
+
+/// Ровно по ширине: короткое дополняется, длинное подрезается с многоточием.
+/// Без подрезки длинная строка выталкивает хвост за край окна и переносится,
+/// ломая расчёт высоты кадра.
+pub fn fit(text: &str, width: usize) -> String {
+    let visible = text.chars().count();
+    if visible <= width {
+        return pad(text, width);
+    }
+    let keep = width.saturating_sub(1);
+    let cut: String = text.chars().take(keep).collect();
+    format!("{cut}…")
+}
+
+/// Подрезать, но не дополнять: для последней колонки в строке, за которой
+/// ничего нет и добивать пробелами не надо.
+pub fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
 fn draw(title: &str, items: &[Item], matches: &[usize], cursor: usize, query: &str) {
     let height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
     // Строки под заголовок, поле поиска и подсказку внизу.
     let room = height.saturating_sub(6).max(3);
 
-    let mut out = String::from("\x1b[2J\x1b[H");
-    out.push_str(&format!("{BOLD}  {title}{RESET}\r\n\r\n"));
-    out.push_str(&format!("  {DIM}поиск:{RESET} {query}▏\r\n\r\n"));
+    // Кадр печатается поверх прежнего, строка затирает строку. Полная очистка
+    // (`\x1b[2J`) на каждое нажатие даёт мерцание — в экране пульта от неё
+    // отказались по этой же причине, а здесь она оставалась.
+    let mut out = String::from("\x1b[H");
+    let mut line = |text: String| {
+        out.push_str(&text);
+        out.push_str("\x1b[K\r\n");
+    };
+
+    let shown: Vec<usize> = {
+        let at = matches.iter().position(|m| *m == cursor).unwrap_or(0);
+        let start = at.saturating_sub(room / 2).min(matches.len().saturating_sub(room));
+        matches.iter().skip(start).take(room).copied().collect()
+    };
+    // Колонка имени — по самому длинному из показанных, как в списке команд на
+    // экране пульта: иначе приписка справа пляшет от строки к строке.
+    let name_width = shown
+        .iter()
+        .map(|i| items[*i].label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 32);
+
+    line(format!("{BOLD}  {title}{RESET}"));
+    line(String::new());
+    let counter = if matches.is_empty() {
+        String::new()
+    } else {
+        let at = matches.iter().position(|m| *m == cursor).unwrap_or(0);
+        format!("  {}/{}", at + 1, matches.len())
+    };
+    line(format!("  {DIM}поиск:{RESET} {query}▏{counter}"));
+    line(String::new());
 
     if matches.is_empty() {
-        out.push_str(&format!("  {YELLOW}ничего не нашлось{RESET}\r\n"));
+        line(format!("  {YELLOW}ничего не нашлось{RESET}"));
     }
 
-    // Окно прокрутки держим вокруг выбранной строки.
-    let at = matches.iter().position(|m| *m == cursor).unwrap_or(0);
-    let start = at.saturating_sub(room / 2).min(matches.len().saturating_sub(room));
-    for index in matches.iter().skip(start).take(room) {
+    for index in &shown {
         let item = &items[*index];
         let selected = *index == cursor;
-        let dot = if item.current { "●" } else { " " };
+        // Точка «сейчас выбрано» зелёная, как и в списке нод: один смысл —
+        // один цвет.
+        let dot = if item.current {
+            format!("{GREEN}●{RESET}")
+        } else {
+            " ".to_string()
+        };
+        let label = fit(&item.label, name_width);
         let hint = item
             .hint
             .as_ref()
             .map(|h| format!("  {DIM}{h}{RESET}"))
             .unwrap_or_default();
         if selected {
-            out.push_str(&format!("  {GREEN}▸ {dot} {}{RESET}{hint}\r\n", item.label));
+            line(format!("  {GREEN}▸{RESET} {dot} {GREEN}{label}{RESET}{hint}"));
         } else {
-            out.push_str(&format!("    {dot} {}{hint}\r\n", item.label));
+            line(format!("    {dot} {label}{hint}"));
         }
     }
-    if matches.len() > room {
-        out.push_str(&format!(
-            "  {DIM}…ещё {}{RESET}\r\n",
-            matches.len() - room
-        ));
+    for _ in shown.len()..room {
+        line(String::new());
     }
-    out.push_str(&format!(
-        "\r\n  {DIM}↑↓ — выбор, Enter — принять, Esc — отмена{RESET}\r\n"
+    line(String::new());
+    line(format!(
+        "  {DIM}↑↓ — выбор, Enter — принять, Esc — отмена{RESET}"
     ));
+    out.push_str("\x1b[J");
 
     print!("{out}");
     std::io::stdout().flush().ok();
@@ -252,6 +336,22 @@ mod tests {
     fn пустой_запрос_оставляет_всё() {
         let list = items(&["a", "b", "c"]);
         assert_eq!(filter(&list, "").len(), 3);
+    }
+
+    #[test]
+    fn целое_слово_бьёт_разбросанные_буквы() {
+        // «off» лежит в `vpn core install` подпоследовательностью o…f…f и
+        // раньше обгонял команду, которая так и называется.
+        let list = items(&["vpn core install", "off"]);
+        let found = filter(&list, "off");
+        assert_eq!(list[found[0]].label, "off");
+    }
+
+    #[test]
+    fn запрос_с_пробелом_узнаётся_целиком() {
+        let list = items(&["vpn update", "vpn off"]);
+        let found = filter(&list, "vpn off");
+        assert_eq!(list[found[0]].label, "vpn off");
     }
 
     #[test]

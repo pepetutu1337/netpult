@@ -124,7 +124,7 @@ fn build_codewords(payload: &[u8], version: usize, gf: &Gf) -> Vec<u8> {
 
     let terminator = std::cmp::min(4, data_capacity * 8 - bits.len());
     put(&mut bits, 0, terminator);
-    while bits.len() % 8 != 0 {
+    while !bits.len().is_multiple_of(8) {
         bits.push(0);
     }
 
@@ -289,14 +289,14 @@ fn place_data(m: &mut Vec<Vec<Option<u8>>>, size: usize, codewords: &[u8]) {
 
 fn mask_bit(mask: usize, r: usize, c: usize) -> bool {
     match mask {
-        0 => (r + c) % 2 == 0,
-        1 => r % 2 == 0,
-        2 => c % 3 == 0,
-        3 => (r + c) % 3 == 0,
-        4 => (r / 2 + c / 3) % 2 == 0,
+        0 => (r + c).is_multiple_of(2),
+        1 => r.is_multiple_of(2),
+        2 => c.is_multiple_of(3),
+        3 => (r + c).is_multiple_of(3),
+        4 => (r / 2 + c / 3).is_multiple_of(2),
         5 => (r * c) % 2 + (r * c) % 3 == 0,
-        6 => ((r * c) % 2 + (r * c) % 3) % 2 == 0,
-        _ => ((r + c) % 2 + (r * c) % 3) % 2 == 0,
+        6 => ((r * c) % 2 + (r * c) % 3).is_multiple_of(2),
+        _ => ((r + c) % 2 + (r * c) % 3).is_multiple_of(2),
     }
 }
 
@@ -450,7 +450,7 @@ pub fn encode(text: &str) -> Result<Vec<Vec<bool>>, String> {
         apply_format(&mut grid, size, mask_id);
 
         let score = penalty(&grid, size);
-        if best.as_ref().map_or(true, |(bs, _)| score < *bs) {
+        if best.as_ref().is_none_or(|(bs, _)| score < *bs) {
             best = Some((score, grid));
         }
     }
@@ -472,10 +472,10 @@ pub fn render(grid: &[Vec<bool>], quiet: usize) -> String {
     for row in grid {
         let mut line = vec![false; quiet];
         line.extend(row.iter().copied());
-        line.extend(std::iter::repeat(false).take(quiet));
+        line.extend(std::iter::repeat_n(false, quiet));
         rows.push(line);
     }
-    rows.extend(std::iter::repeat(blank).take(quiet));
+    rows.extend(std::iter::repeat_n(blank, quiet));
 
     let mut out = String::new();
     let mut i = 0;

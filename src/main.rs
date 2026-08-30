@@ -63,7 +63,6 @@ pub fn dispatch_with(
     rest: &[&str],
     palette: bool,
 ) -> Result<(), String> {
-    let cfg = cfg;
     let rest = rest.to_vec();
     match command {
         "tui" | "menu" | "" => tui::run(cfg),
@@ -491,10 +490,7 @@ fn zapret_action(
     println!("{what}...");
     std::io::Write::flush(&mut std::io::stdout()).ok();
     action(&Zapret::new(cfg))?;
-    for (ok, line) in status_lines(cfg) {
-        let color = if ok { GREEN } else { RED };
-        println!("{color}{line}{RESET}");
-    }
+    print_status_lines(cfg);
     Ok(())
 }
 
@@ -1091,46 +1087,80 @@ fn raw_qr(text: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn status_lines(cfg: &Config) -> Vec<(bool, String)> {
+/// Строка состояния одной службы, разобранная на колонки.
+///
+/// Колонки нарочно не склеены пробелами внутри строки: выравнивание — дело
+/// того, кто рисует. Экран и вывод в консоль ставят их по-разному, а ширина
+/// имени зависит от того, какие службы вообще подняты.
+pub struct Status {
+    pub ok: bool,
+    /// Имя службы: `zapret`, `VPN`, `Telegram`.
+    pub name: &'static str,
+    /// Короткое положение дел: `ВКЛ`, `ВЫКЛ`, `не установлен`.
+    pub state: String,
+    /// Подробность, если она есть: стратегия, адрес, число устройств.
+    pub detail: String,
+}
+
+impl Status {
+    fn new(ok: bool, name: &'static str, state: &str, detail: &str) -> Status {
+        Status {
+            ok,
+            name,
+            state: state.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
+pub fn status_lines(cfg: &Config) -> Vec<Status> {
     let z = Zapret::new(cfg);
     let mut lines = Vec::new();
 
     lines.push(match z.state() {
-        zapret::State::On => (
+        zapret::State::On => Status::new(
             true,
-            format!("zapret    ВКЛ    {}", z.strategy().unwrap_or_default()),
+            "zapret",
+            "ВКЛ",
+            &z.strategy().unwrap_or_default(),
         ),
-        zapret::State::Off => (false, "zapret    ВЫКЛ".to_string()),
+        zapret::State::Off => Status::new(false, "zapret", "ВЫКЛ", ""),
         // На маке и в Windows свой движок zapret ставится отдельно и пультом
         // пока не управляется — пугать этим красной строкой незачем.
         zapret::State::Missing if !cfg!(target_os = "linux") => {
-            (false, "zapret    управляется отдельно (не Linux)".to_string())
+            Status::new(false, "zapret", "—", "управляется отдельно (не Linux)")
         }
-        zapret::State::Missing => (false, "zapret    не установлен".to_string()),
+        zapret::State::Missing => Status::new(false, "zapret", "нет", "не установлен"),
     });
 
     lines.push(match Vpn::new(cfg).state() {
-        vpn::State::Tunnel => (true, "VPN       ВКЛ    туннель поднят".to_string()),
-        vpn::State::AppOnly => (false, "VPN       окно открыто, туннеля нет".to_string()),
-        vpn::State::Off => (false, "VPN       ВЫКЛ".to_string()),
+        vpn::State::Tunnel => Status::new(true, "VPN", "ВКЛ", "туннель поднят"),
+        vpn::State::AppOnly => Status::new(false, "VPN", "—", "окно открыто, туннеля нет"),
+        vpn::State::Off => Status::new(false, "VPN", "ВЫКЛ", ""),
     });
 
     if probe::port_open(cfg.split_port, Duration::from_millis(300)) {
         let node = socks::reachable(&cfg.split_upstream, Duration::from_secs(1));
-        lines.push((node, format!(
-            "Сплит     ВКЛ    {}",
-            if node { "нода отвечает" } else { "нода молчит" }
-        )));
+        lines.push(Status::new(
+            node,
+            "Сплит",
+            "ВКЛ",
+            if node { "нода отвечает" } else { "нода молчит" },
+        ));
     }
-    let share_on = probe::port_open(cfg.share_port, Duration::from_millis(300));
-    if share_on {
+    if probe::port_open(cfg.share_port, Duration::from_millis(300)) {
         let ip = probe::lan_ip().map(|i| i.to_string()).unwrap_or_default();
         let clients = probe::connected_peers(cfg.share_port).len();
         let tail = match clients {
             0 => "устройств нет".to_string(),
             n => format!("устройств: {n}"),
         };
-        lines.push((true, format!("Раздача   ВКЛ    {ip}:{}  {tail}", cfg.share_port)));
+        lines.push(Status::new(
+            true,
+            "Раздача",
+            "ВКЛ",
+            &format!("{ip}:{}  {tail}", cfg.share_port),
+        ));
     }
 
     let tg = Telegram::new(cfg);
@@ -1138,19 +1168,45 @@ pub fn status_lines(cfg: &Config) -> Vec<(bool, String)> {
         let where_ = probe::lan_ip()
             .map(|ip| format!("{ip}:{}", cfg.tg_port))
             .unwrap_or_else(|| format!("порт {}", cfg.tg_port));
-        (true, format!("Telegram  ВКЛ    {where_}"))
+        Status::new(true, "Telegram", "ВКЛ", &where_)
     } else {
-        (false, "Telegram  ВЫКЛ".to_string())
+        Status::new(false, "Telegram", "ВЫКЛ", "")
     });
 
     lines
 }
 
-fn print_status(cfg: &Config) {
-    for (ok, line) in status_lines(cfg) {
-        let color = if ok { GREEN } else { RED };
-        println!("{color}{line}{RESET}");
+/// Ширина колонки имени по самому длинному из показываемых.
+pub fn status_name_width(lines: &[Status]) -> usize {
+    lines
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Состояние служб столбиком: имя, положение, подробность.
+fn print_status_lines(cfg: &Config) {
+    let lines = status_lines(cfg);
+    let width = status_name_width(&lines);
+    for s in &lines {
+        let color = if s.ok { GREEN } else { RED };
+        let name = format!("{:<width$}", s.name, width = width);
+        let state = format!("{:<4}", s.state);
+        if s.detail.is_empty() {
+            println!("{color}{name}  {state}{RESET}");
+        } else {
+            println!("{color}{name}  {state}{RESET}  {DIM}{}{RESET}", s.detail);
+        }
     }
+}
+
+fn print_status(cfg: &Config) {
+    // Первым — ответ на вопрос, ради которого команду и набирают.
+    let (ok, carrier) = route::carrier(cfg);
+    let color = if ok { GREEN } else { YELLOW };
+    println!("{BOLD}Трафик{RESET}  {color}{carrier}{RESET}\n");
+    print_status_lines(cfg);
     println!("{DIM}{}{RESET}", watch::status());
     match probe::external_addr(Duration::from_secs(5)) {
         Some(a) => println!("внешний адрес: {} · {} · {}", a.ip, a.country, a.org),
@@ -1172,7 +1228,7 @@ pub fn run_test_public(cfg: &Config) {
     println!("Доступность:");
     for (label, url) in [
         ("youtube.com ", "https://www.youtube.com/generate_204"),
-        ("ytimg (CDN) ", "https://i.ytimg.com/generate_204"),
+        ("ytimg (превью)", "https://i.ytimg.com/generate_204"),
         ("discord.com ", "https://discord.com/api/v9/gateway"),
         ("telegram.org", "https://web.telegram.org/"),
     ] {
@@ -1183,6 +1239,30 @@ pub fn run_test_public(cfg: &Config) {
             (RED, "НЕ открывается")
         };
         println!("{color}  {label} — {verdict}{RESET}");
+    }
+
+    // Отдельно и последним — то, ради чего всё затевается. Страница и превью
+    // открываются даже со сломанным обходом, а видео при этом не идёт.
+    let video = probe::video(Duration::from_secs(10));
+    if !video.checked {
+        println!("{DIM}  видео-CDN   — сервер для проверки не нашёлся{RESET}");
+    } else {
+        let (color, verdict) = if video.plain {
+            (GREEN, "идёт")
+        } else {
+            (RED, "МОЛЧИТ")
+        };
+        println!("{color}  видео-CDN   — {verdict}{RESET}");
+        match video.browser {
+            Some(true) => println!("{GREEN}  то же браузерным приветствием TLS — идёт{RESET}"),
+            Some(false) => {
+                println!("{YELLOW}  то же браузерным приветствием TLS — МОЛЧИТ{RESET}");
+                println!(
+                    "{DIM}  Вот так и выглядит «в консоли всё есть, а в браузере ютуб не грузится»:\n  браузер шлёт приветствие на два килобайта, DPI его собирает и режет.{RESET}"
+                );
+            }
+            None => {}
+        }
     }
 
     if Telegram::new(cfg).running() {

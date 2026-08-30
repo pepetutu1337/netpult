@@ -16,12 +16,30 @@ use std::time::Duration;
 pub struct Score {
     pub strategy: String,
     pub reachable: bool,
+    /// Что ответил видео-CDN на обычное и на браузерное приветствие TLS.
+    pub video: probe::Video,
     pub speed: f64,
 }
 
 impl Score {
     fn value(&self) -> f64 {
-        if self.reachable { 1000.0 + self.speed } else { self.speed / 10.0 }
+        // Три ступени, и порядок между ними важнее любой скорости.
+        //
+        // Стратегия, которую держит только консоль, — ловушка: все проверки
+        // зелёные, а браузер у человека молчит. Такая обязана проигрывать
+        // любой полноценной, даже заметно более медленной.
+        let tier = match (self.reachable, self.video.ok(), self.video.console_only()) {
+            (true, true, _) => 3000.0,
+            (true, false, true) => 1500.0,
+            (true, false, false) => 1000.0,
+            _ => 0.0,
+        };
+        if tier > 0.0 { tier + self.speed } else { self.speed / 10.0 }
+    }
+
+    /// Годится без оговорок: и страница, и видео, и браузерное приветствие.
+    pub fn full(&self) -> bool {
+        self.reachable && self.video.ok()
     }
 }
 
@@ -62,13 +80,15 @@ fn measure(z: &Zapret, name: &str) -> Result<Score, String> {
         "https://www.youtube.com/generate_204",
         Duration::from_secs(8),
     );
+    // Страница ютуба открывается и со сломанным обходом — решает видео-CDN.
+    let video = probe::video(Duration::from_secs(8));
 
     // Два замера, берём лучший: холодный старт соединения занижает первый.
     let speed = (0..2)
         .filter_map(|_| probe::google_speed(Duration::from_secs(15)))
         .fold(0.0_f64, f64::max);
 
-    Ok(Score { strategy: name.to_string(), reachable, speed })
+    Ok(Score { strategy: name.to_string(), reachable, video, speed })
 }
 
 /// Подбирает рабочую стратегию и оставляет лучшую из проверенных.
@@ -86,11 +106,10 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
 
     // Текущая идёт первой: чаще всего менять ничего и не нужно.
     let mut order: Vec<String> = Vec::new();
-    if let Some(now) = &current {
-        if all.contains(now) {
+    if let Some(now) = &current
+        && all.contains(now) {
             order.push(now.clone());
         }
-    }
     order.extend(all.into_iter().filter(|s| Some(s) != current.as_ref()));
 
     let mut results: Vec<Score> = Vec::new();
@@ -103,15 +122,20 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
 
         let score = measure(&z, name)?;
         if options.verbose {
-            let mark = if score.reachable {
-                format!("{GREEN}открывается{RESET}")
-            } else {
-                format!("{RED}нет{RESET}")
+            let mark = match (score.reachable, score.video.plain) {
+                (true, true) => format!("{GREEN}видео идёт{RESET}"),
+                (true, false) => format!("{RED}видео молчит{RESET}"),
+                _ => format!("{RED}нет{RESET}"),
             };
-            println!("{mark}  {:.0} КБ/с", score.speed);
+            let browser = match score.video.browser {
+                Some(true) => format!("  {GREEN}браузер ок{RESET}"),
+                Some(false) => format!("  {YELLOW}только консоль{RESET}"),
+                None => String::new(),
+            };
+            println!("{mark}{browser}  {:.0} КБ/с", score.speed);
         }
 
-        let good = score.reachable && score.speed >= GOOD_ENOUGH_KBS;
+        let good = score.full() && score.speed >= GOOD_ENOUGH_KBS;
         results.push(score);
         if good && !options.full {
             if options.verbose {
@@ -128,10 +152,13 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
         .ok_or("нечего выбирать")?;
 
     // Рабочую стратегию меняем, только если новая заметно лучше.
+    // Оговорка про запас скорости действует, только пока текущая стратегия
+    // хороша целиком. Если браузер на ней молчит, держаться за неё из-за
+    // лишних килобайт в секунду незачем — меняем на полноценную.
     let chosen = match results.first() {
         Some(now)
             if now.strategy == *current.as_deref().unwrap_or("")
-                && now.reachable
+                && now.full()
                 && best.speed < now.speed * SWITCH_MARGIN =>
         {
             if options.verbose && best.strategy != now.strategy {
@@ -145,10 +172,21 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
         _ => best,
     };
 
-    if !chosen.reachable && options.verbose {
-        println!(
-            "{YELLOW}  Ни одна стратегия не открыла YouTube. Оставляю лучшую по скорости.{RESET}"
-        );
+    if options.verbose {
+        if !chosen.reachable {
+            println!(
+                "{YELLOW}  Ни одна стратегия не открыла YouTube. Оставляю лучшую по скорости.{RESET}"
+            );
+        } else if chosen.video.console_only() {
+            println!(
+                "{YELLOW}  Ни одна стратегия не прошла браузерным приветствием TLS.{RESET}"
+            );
+            println!(
+                "{DIM}  Консоль и качалки работать будут, браузер — нет. Лечится не тут, а\n  на стороне обхода: нужна стратегия, переживающая приветствие в два\n  килобайта (помогает fooling=badseq).{RESET}"
+            );
+        } else if !chosen.video.plain {
+            println!("{YELLOW}  Страница ютуба открылась, а видео-CDN молчит.{RESET}");
+        }
     }
 
     z.set_strategy(&chosen.strategy)?;
