@@ -1122,7 +1122,7 @@ fn dns_status() {
     };
     println!("{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {color}{text}{RESET}");
     println!("{DIM}резолвер 127.0.0.1:{} · наружу DoH к 1.1.1.1 · российские зоны напрямую{RESET}",
-        dns::PORT);
+        dns::port());
     if state == dns::State::Off && !hooked {
         println!("{DIM}включить: net dns on{RESET}");
     }
@@ -1146,7 +1146,7 @@ fn dns_test() {
     отметить(подключена, &format!(
         "система спрашивает   {}",
         if подключена {
-            format!("127.0.0.1:{} — это мы", dns::PORT)
+            format!("127.0.0.1:{} — это мы", dns::port())
         } else {
             "DNS своей сети — резолвер не подключён".to_string()
         }
@@ -1157,7 +1157,7 @@ fn dns_test() {
     let метка = format!("np{}", sub::now_secs() % 100_000);
     let заграничное = format!("{метка}.example.com");
     let российское = format!("{метка}.vtb.ru");
-    let живой = dns::ask("127.0.0.1", dns::PORT, "example.com", Duration::from_secs(6));
+    let живой = dns::ask("127.0.0.1", dns::port(), "example.com", Duration::from_secs(6));
     отметить(живой.is_some(), &match &живой {
         Some(ответ) if !ответ.адреса.is_empty() => format!(
             "резолвер отвечает    example.com → {} за {} мс",
@@ -1165,11 +1165,11 @@ fn dns_test() {
             ответ.заняло.as_millis()
         ),
         Some(_) => "резолвер отвечает    но без адресов".to_string(),
-        None => format!("резолвер молчит      на 127.0.0.1:{}", dns::PORT),
+        None => format!("резолвер молчит      на 127.0.0.1:{}", dns::port()),
     });
 
-    let _ = dns::ask("127.0.0.1", dns::PORT, &заграничное, Duration::from_secs(6));
-    let _ = dns::ask("127.0.0.1", dns::PORT, &российское, Duration::from_secs(6));
+    let _ = dns::ask("127.0.0.1", dns::port(), &заграничное, Duration::from_secs(6));
+    let _ = dns::ask("127.0.0.1", dns::port(), &российское, Duration::from_secs(6));
     let (doh, ru) = dns::каналы();
     отметить(doh, "канал наружу         1.1.1.1:443 — шифрованный DoH");
     отметить(ru, "российские зоны      77.88.8.8:53 — напрямую, чтоб банки жили");

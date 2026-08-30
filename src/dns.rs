@@ -22,27 +22,41 @@ use std::time::{Duration, Instant};
 
 /// Порт резолвера. 53 занят заглушкой systemd-resolved, 5353 — mDNS
 /// (kdeconnect и avahi держат его на любой десктопной системе), поэтому 5335.
-pub const PORT: u16 = 5335;
+/// Порт резолвера.
+///
+/// На Linux `systemd-resolved` принимает адрес с портом, поэтому берём
+/// непривилегированный: 53 занят его же заглушкой, 5353 — mDNS (kdeconnect и
+/// avahi держат его на любой десктопной системе), отсюда 5335.
+///
+/// На маке и Windows системе адрес назначается через `networksetup` и `netsh`,
+/// а они порт задать не умеют — только адрес. Значит слушать надо 53, и
+/// служба там поднимается от администратора.
+pub fn port() -> u16 {
+    if cfg!(target_os = "linux") { 5335 } else { 53 }
+}
 
 const UNIT: &str = "netpult-dns.service";
 const UNIT_PATH: &str = "/etc/systemd/system/netpult-dns.service";
 const DROPIN_DIR: &str = "/etc/systemd/resolved.conf.d";
 const DROPIN: &str = "/etc/systemd/resolved.conf.d/netpult.conf";
 
+/// launchd на маке: демон системный, потому что 53 — привилегированный порт.
+const PLIST: &str = "/Library/LaunchDaemons/com.netpult.dns.plist";
+const LABEL: &str = "com.netpult.dns";
+
+/// Служба Windows.
+const WINSVC: &str = "netpult-dns";
+
 /// Куда уходит всё, кроме российских зон.
 const DOH: &str = "1.1.1.1";
 /// Кто резолвит российские зоны. Тот же, что на роутере.
 const RU: &str = "77.88.8.8";
 
-/// Подведён ли свой резолвер к этой системе.
-///
-/// Сам резолвер — обычное ядро sing-box и пойдёт где угодно. Не хватает
-/// второй половины: способа сказать системе «спрашивай его». На Linux это
-/// systemd-resolved, на маке `networksetup`, на Windows `netsh` — и обе
-/// последние умеют только порт 53, то есть резолвер там придётся поднимать
-/// на привилегированном порту и держать службой их средствами. Не сделано.
+/// Подведён ли свой резолвер к этой системе. Резолвер — обычное ядро sing-box
+/// и идёт везде; вопрос всегда во второй половине, в способе сказать системе
+/// «спрашивай его».
 pub fn поддержано() -> bool {
-    cfg!(target_os = "linux")
+    cfg!(target_os = "linux") || cfg!(target_os = "macos") || cfg!(windows)
 }
 
 pub fn config_path() -> std::path::PathBuf {
@@ -209,7 +223,7 @@ fn таблица(args: &[&str]) -> String {
 
 /// Отвечает ли наш резолвер прямо сейчас.
 pub fn отвечает(timeout: Duration) -> bool {
-    ask("127.0.0.1", PORT, "example.com", timeout)
+    ask("127.0.0.1", port(), "example.com", timeout)
         .map(|o| !o.адреса.is_empty())
         .unwrap_or(false)
 }
@@ -224,12 +238,7 @@ pub enum State {
 }
 
 pub fn state() -> State {
-    let running = Command::new("systemctl")
-        .args(["is-active", "--quiet", UNIT])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !running {
+    if !служба_поднята() {
         return State::Off;
     }
     if отвечает(Duration::from_secs(3)) {
@@ -239,11 +248,94 @@ pub fn state() -> State {
     }
 }
 
-/// Переведён ли systemd-resolved на нас.
-pub fn подключён() -> bool {
-    std::fs::read_to_string(DROPIN)
-        .map(|t| t.contains(&format!("127.0.0.1:{PORT}")))
+fn служба_поднята() -> bool {
+    if cfg!(target_os = "linux") {
+        успех("systemctl", &["is-active", "--quiet", UNIT])
+    } else if cfg!(target_os = "macos") {
+        // `launchctl print` возвращает ноль, только если демон загружен.
+        успех("launchctl", &["print", &format!("system/{LABEL}")])
+    } else {
+        Command::new("sc")
+            .args(["query", WINSVC])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
+            .unwrap_or(false)
+    }
+}
+
+fn успех(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Сетевые службы мака, у которых есть смысл трогать DNS. `networksetup`
+/// перечисляет и отключённые — они помечены звёздочкой, их пропускаем.
+fn маковские_службы() -> Vec<String> {
+    let out = Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    разобрать_службы(&out)
+}
+
+fn разобрать_службы(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(1) // первая строка — пояснение про звёздочку
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('*'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Сетевые адаптеры Windows, которым назначается DNS.
+fn виндовые_адаптеры() -> Vec<String> {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected | ForEach-Object { $_.InterfaceAlias }",
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "Loopback Pseudo-Interface 1")
+        .map(str::to_string)
+        .collect()
+}
+
+/// Спрашивает ли система именно нас.
+pub fn подключён() -> bool {
+    if cfg!(target_os = "linux") {
+        std::fs::read_to_string(DROPIN)
+            .map(|t| t.contains(&format!("127.0.0.1:{}", port())))
+            .unwrap_or(false)
+    } else if cfg!(target_os = "macos") {
+        маковские_службы().iter().any(|служба| {
+            Command::new("networksetup")
+                .args(["-getdnsservers", служба])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("127.0.0.1"))
+                .unwrap_or(false)
+        })
+    } else {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses",
+            ])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("127.0.0.1"))
+            .unwrap_or(false)
+    }
 }
 
 fn sudo_write(path: &str, body: &str) -> Result<(), String> {
@@ -309,27 +401,173 @@ fn dropin_text() -> String {
     format!(
         "# Поставлено netpult (net dns on). Убрать: net dns off\n\
          [Resolve]\n\
-         DNS=127.0.0.1:{PORT}\n\
+         DNS=127.0.0.1:{}\n\
          Domains=~.\n\
          DNSOverTLS=no\n\
-         DNSStubListener=yes\n"
+         DNSStubListener=yes\n",
+        port()
     )
 }
 
+/// Текст plist для launchd. Демон системный: 53 — привилегированный порт, и
+/// он должен подниматься до входа в сеанс, иначе имена не резолвятся с
+/// загрузки.
+fn plist_text(bin: &str, config: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\n\
+         <key>Label</key><string>{LABEL}</string>\n\
+         <key>ProgramArguments</key><array>\n\
+         <string>{bin}</string><string>run</string><string>-c</string><string>{config}</string>\n\
+         </array>\n\
+         <key>RunAtLoad</key><true/>\n\
+         <key>KeepAlive</key><true/>\n\
+         </dict></plist>\n"
+    )
+}
+
+/// Поднять службу резолвера средствами этой системы.
+fn поднять_службу(bin: &str, config: &str) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        sudo_write(UNIT_PATH, &unit_text(bin, config))?;
+        sudo(&["systemctl", "daemon-reload"])?;
+        sudo(&["systemctl", "enable", "--now", UNIT])
+    } else if cfg!(target_os = "macos") {
+        sudo_write(PLIST, &plist_text(bin, config))?;
+        sudo(&["chown", "root:wheel", PLIST])?;
+        // bootout на всякий случай: повторное bootstrap поверх загруженного
+        // демона отвечает отказом, а не перезагружает его.
+        let _ = sudo(&["launchctl", "bootout", &format!("system/{LABEL}")]);
+        sudo(&["launchctl", "bootstrap", "system", PLIST])
+    } else {
+        // sc принимает binPath одной строкой; кавычки нужны из-за пробелов в
+        // пути к профилю пользователя.
+        let path = format!("\"{bin}\" run -c \"{config}\"");
+        let _ = sudo(&["sc", "delete", WINSVC]);
+        sudo(&[
+            "sc",
+            "create",
+            WINSVC,
+            &format!("binPath= {path}"),
+            "start= auto",
+            "DisplayName= netpult DNS",
+        ])?;
+        sudo(&["sc", "start", WINSVC])
+    }
+}
+
+fn снять_службу() -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        sudo(&["systemctl", "disable", "--now", UNIT])?;
+        sudo(&["rm", "-f", UNIT_PATH])?;
+        sudo(&["systemctl", "daemon-reload"])
+    } else if cfg!(target_os = "macos") {
+        let _ = sudo(&["launchctl", "bootout", &format!("system/{LABEL}")]);
+        sudo(&["rm", "-f", PLIST])
+    } else {
+        let _ = sudo(&["sc", "stop", WINSVC]);
+        sudo(&["sc", "delete", WINSVC])
+    }
+}
+
+/// Сказать системе спрашивать нас.
+fn привязать_систему() -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        sudo(&["mkdir", "-p", DROPIN_DIR])?;
+        sudo_write(DROPIN, &dropin_text())?;
+        sudo(&["systemctl", "restart", "systemd-resolved"])
+    } else if cfg!(target_os = "macos") {
+        let службы = маковские_службы();
+        if службы.is_empty() {
+            return Err("не нашёл ни одной сетевой службы — networksetup молчит".into());
+        }
+        for служба in &службы {
+            sudo(&["networksetup", "-setdnsservers", служба, "127.0.0.1"])?;
+        }
+        // Кэш мака держит прежние ответы; без сброса переключение заметно не сразу.
+        let _ = sudo(&["dscacheutil", "-flushcache"]);
+        let _ = sudo(&["killall", "-HUP", "mDNSResponder"]);
+        Ok(())
+    } else {
+        let адаптеры = виндовые_адаптеры();
+        if адаптеры.is_empty() {
+            return Err("не нашёл подключённых адаптеров".into());
+        }
+        for адаптер in &адаптеры {
+            sudo(&[
+                "netsh",
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                &format!("name={адаптер}"),
+                "static",
+                "127.0.0.1",
+                "primary",
+            ])?;
+        }
+        let _ = sudo(&["ipconfig", "/flushdns"]);
+        Ok(())
+    }
+}
+
+fn отвязать_систему() -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        sudo(&["rm", "-f", DROPIN])?;
+        sudo(&["systemctl", "restart", "systemd-resolved"])
+    } else if cfg!(target_os = "macos") {
+        for служба in маковские_службы() {
+            // «Empty» — то самое слово, которым networksetup возвращает
+            // раздачу DNS обратно роутеру.
+            let _ = sudo(&["networksetup", "-setdnsservers", &служба, "Empty"]);
+        }
+        let _ = sudo(&["dscacheutil", "-flushcache"]);
+        let _ = sudo(&["killall", "-HUP", "mDNSResponder"]);
+        Ok(())
+    } else {
+        for адаптер in виндовые_адаптеры() {
+            let _ = sudo(&[
+                "netsh",
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                &format!("name={адаптер}"),
+                "dhcp",
+            ]);
+        }
+        let _ = sudo(&["ipconfig", "/flushdns"]);
+        Ok(())
+    }
+}
+
+/// Через что система резолвит имена. На Linux — заглушка resolved, на маке и
+/// Windows система спрашивает наш адрес напрямую, отдельной заглушки нет.
+fn системный_резолвер() -> (&'static str, u16) {
+    if cfg!(target_os = "linux") {
+        ("127.0.0.53", 53)
+    } else {
+        ("127.0.0.1", port())
+    }
+}
+
 pub fn on(cfg: &Config) -> Result<Vec<String>, String> {
-    if !cfg!(target_os = "linux") {
+    if !поддержано() {
         return Err(format!(
             "на {} свой резолвер ещё не подведён",
             std::env::consts::OS
         ));
     }
     let bin = crate::singbox::Core::new(cfg).bin()?;
-    crate::sudoer::ready()?;
+    if !cfg!(windows) {
+        crate::sudoer::ready()?;
+    }
 
     let mut шаги = Vec::new();
     let config = config_path();
     std::fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(&config, build_config(PORT)).map_err(|e| format!("не записать конфиг: {e}"))?;
+    std::fs::write(&config, build_config(port())).map_err(|e| format!("не записать конфиг: {e}"))?;
 
     // Проверяем конфиг тем же ядром, что будет его исполнять: битый конфиг не
     // должен уронить DNS всей машины.
@@ -344,12 +582,7 @@ pub fn on(cfg: &Config) -> Result<Vec<String>, String> {
         ));
     }
 
-    sudo_write(
-        UNIT_PATH,
-        &unit_text(&bin.to_string_lossy(), &config.to_string_lossy()),
-    )?;
-    sudo(&["systemctl", "daemon-reload"])?;
-    sudo(&["systemctl", "enable", "--now", UNIT])?;
+    поднять_службу(&bin.to_string_lossy(), &config.to_string_lossy())?;
     шаги.push("резолвер поднят".into());
 
     // Ждём, пока резолвер реально ответит. Переводить систему на молчащий
@@ -362,54 +595,59 @@ pub fn on(cfg: &Config) -> Result<Vec<String>, String> {
         std::thread::sleep(Duration::from_millis(400));
     }
     if !отвечает(Duration::from_secs(3)) {
-        let _ = sudo(&["systemctl", "disable", "--now", UNIT]);
+        let _ = снять_службу();
         return Err(format!(
-            "резолвер не отвечает на 127.0.0.1:{PORT} — систему не трогаю, смотри: journalctl -u {UNIT} -n 30"
+            "резолвер не отвечает на 127.0.0.1:{} — систему не трогаю, смотри {}",
+            port(),
+            где_журнал()
         ));
     }
     шаги.push("резолвер отвечает".into());
 
-    sudo(&["mkdir", "-p", DROPIN_DIR])?;
-    sudo_write(DROPIN, &dropin_text())?;
-    sudo(&["systemctl", "restart", "systemd-resolved"])?;
-    шаги.push("systemd-resolved переведён".into());
+    привязать_систему()?;
+    шаги.push("система переведена на него".into());
 
-    // Последняя проверка — уже глазами системы, через её заглушку.
-    std::thread::sleep(Duration::from_millis(700));
-    if ask("127.0.0.53", 53, "example.com", Duration::from_secs(5))
-        .map(|o| o.адреса.is_empty())
+    // Последняя проверка — уже глазами системы.
+    std::thread::sleep(Duration::from_millis(900));
+    let (server, порт) = системный_резолвер();
+    if ask(server, порт, "example.com", Duration::from_secs(5))
+        .map(|ответ| ответ.адреса.is_empty())
         .unwrap_or(true)
     {
-        off_dropin()?;
-        return Err(
-            "после перевода система перестала резолвить — вернул как было".into(),
-        );
+        let _ = отвязать_систему();
+        return Err("после перевода система перестала резолвить — вернул как было".into());
     }
     шаги.push("система резолвит через нас".into());
     Ok(шаги)
 }
 
-fn off_dropin() -> Result<(), String> {
-    sudo(&["rm", "-f", DROPIN])?;
-    sudo(&["systemctl", "restart", "systemd-resolved"])
+fn где_журнал() -> String {
+    if cfg!(target_os = "linux") {
+        format!("journalctl -u {UNIT} -n 30")
+    } else if cfg!(target_os = "macos") {
+        "log show --predicate 'process == \"sing-box\"' --last 5m".to_string()
+    } else {
+        format!("Просмотр событий → Журналы Windows → Система, служба {WINSVC}")
+    }
 }
 
 pub fn off() -> Result<Vec<String>, String> {
-    crate::sudoer::ready()?;
+    if !поддержано() {
+        return Err(format!(
+            "на {} свой резолвер не подводился — и снимать нечего",
+            std::env::consts::OS
+        ));
+    }
+    if !cfg!(windows) {
+        crate::sudoer::ready()?;
+    }
     let mut шаги = Vec::new();
     if подключён() {
-        off_dropin()?;
-        шаги.push("systemd-resolved вернулся к DNS сети".into());
+        отвязать_систему()?;
+        шаги.push("система вернулась к DNS своей сети".into());
     }
-    if Command::new("systemctl")
-        .args(["is-enabled", "--quiet", UNIT])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        sudo(&["systemctl", "disable", "--now", UNIT])?;
-        sudo(&["rm", "-f", UNIT_PATH])?;
-        sudo(&["systemctl", "daemon-reload"])?;
+    if служба_поднята() {
+        снять_службу()?;
         шаги.push("резолвер снят".into());
     }
     if шаги.is_empty() {
@@ -462,9 +700,46 @@ mod tests {
     }
 
     #[test]
+    fn службы_мака_разбираются() {
+        // Настоящий вывод `networksetup -listallnetworkservices`: первая
+        // строка — пояснение, звёздочкой помечены отключённые службы.
+        let text = "An asterisk (*) denotes that a network service is disabled.\n\
+                    Wi-Fi\n\
+                    *Thunderbolt Bridge\n\
+                    iPhone USB\n";
+        assert_eq!(разобрать_службы(text), vec!["Wi-Fi", "iPhone USB"]);
+    }
+
+    #[test]
+    fn пустой_вывод_networksetup_не_валит() {
+        assert!(разобрать_службы("").is_empty());
+        assert!(разобрать_службы("An asterisk (*) denotes...").is_empty());
+    }
+
+    #[test]
+    fn plist_называет_демона_и_бинарь() {
+        let text = plist_text("/usr/local/bin/sing-box", "/tmp/dns.json");
+        assert!(text.contains("<key>Label</key><string>com.netpult.dns</string>"));
+        assert!(text.contains("/usr/local/bin/sing-box"));
+        assert!(text.contains("/tmp/dns.json"));
+        assert!(text.contains("<key>RunAtLoad</key><true/>"));
+    }
+
+    #[test]
+    fn порт_под_систему() {
+        // На Linux resolved принимает порт, поэтому непривилегированный.
+        // На маке и Windows адрес назначается без порта — значит только 53.
+        if cfg!(target_os = "linux") {
+            assert_eq!(port(), 5335);
+        } else {
+            assert_eq!(port(), 53);
+        }
+    }
+
+    #[test]
     fn настройка_resolved_перехватывает_всё() {
         // Без `Domains=~.` resolved продолжит спрашивать DNS роутера.
         assert!(dropin_text().contains("Domains=~."));
-        assert!(dropin_text().contains(&format!("DNS=127.0.0.1:{PORT}")));
+        assert!(dropin_text().contains(&format!("DNS=127.0.0.1:{}", port())));
     }
 }
