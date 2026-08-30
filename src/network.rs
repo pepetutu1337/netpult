@@ -97,14 +97,6 @@ pub fn known(network: Option<&str>) -> Option<Seen> {
     load().get(network?).copied()
 }
 
-pub fn forget(network: &str) -> Result<(), String> {
-    let mut all = load();
-    if all.remove(network).is_none() {
-        return Err(format!("про сеть «{network}» ничего не записано"));
-    }
-    save_all(&all)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
