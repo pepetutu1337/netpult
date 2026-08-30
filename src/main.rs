@@ -321,11 +321,11 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 .get(1)
                 .copied()
                 .ok_or("нужна ссылка: net vpn sub <ссылка на подписку>")?;
-            vpn_subscribe(url)
+            vpn_subscribe(cfg, url)
         }
         Some("update") => {
             let url = sub::saved_url()?;
-            vpn_subscribe(&url)
+            vpn_subscribe(cfg, &url)
         }
         Some("core") => match rest.get(1).copied() {
             Some("install") | None => {
@@ -657,7 +657,7 @@ fn vpn_bank_rm(what: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn vpn_subscribe(url: &str) -> Result<(), String> {
+fn vpn_subscribe(cfg: &Config, url: &str) -> Result<(), String> {
     println!("Забираю подписку...");
     let mut nodes = sub::fetch(url, Duration::from_secs(30))?;
 
@@ -723,7 +723,36 @@ fn vpn_subscribe(url: &str) -> Result<(), String> {
         println!("{DIM}в запасе лежит молчащих: {asleep} (вернутся, когда оживут){RESET}");
     }
     println!("Список нод — net vpn nodes");
+
+    // Ядро держит конфиг в памяти с момента запуска. Без перезапуска новые
+    // ноды лежат на диске, а туннель продолжает ходить через старые — и
+    // команда выглядит выполненной, хотя ничего не изменилось.
+    подхватить_ноды(cfg);
     Ok(())
+}
+
+/// Перезапустить туннель, если он поднят, чтобы обновлённые ноды заработали.
+/// Молча этого не делаем: перезапуск роняет связь на пару секунд, и человек
+/// должен понимать, почему у него моргнул интернет.
+fn подхватить_ноды(cfg: &Config) {
+    let core = singbox::Core::new(cfg);
+    if core.state() != singbox::State::Up {
+        return;
+    }
+    println!("\n{DIM}Туннель поднят на прежнем конфиге — перезапускаю, чтобы новые ноды{RESET}");
+    println!("{DIM}заработали. Связь моргнёт на пару секунд.{RESET}");
+    if let Err(e) = core.stop() {
+        println!("{YELLOW}Не вышло снять туннель: {e}{RESET}");
+        println!("{DIM}Новые ноды уже на диске — примени вручную: net vpn off && net vpn on{RESET}");
+        return;
+    }
+    match core.start() {
+        Ok(()) => println!("{GREEN}Туннель поднят на новых нодах{RESET}"),
+        Err(e) => {
+            println!("{RED}Туннель не поднялся обратно: {e}{RESET}");
+            println!("{DIM}Конфиг сохранён, подними вручную: net vpn on{RESET}");
+        }
+    }
 }
 
 /// Общая обвязка для «включи/выключи/перезапусти»: сказать, что делаем, до
