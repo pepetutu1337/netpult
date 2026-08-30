@@ -37,6 +37,12 @@ pub const RESET: &str = "\x1b[0m";
 
 fn main() {
     quiet_broken_pipe();
+    // Пульт красит вывод и стирает строку прогресса управляющими
+    // последовательностями. Windows-консоль по умолчанию их не разбирает и
+    // печатает как текст; этот вызов включает их разбор, если консоль умеет.
+    // На Linux и macOS он ничего не делает.
+    #[cfg(windows)]
+    let _ = crossterm::ansi_support::supports_ansi();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cfg = Config::load();
 
