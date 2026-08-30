@@ -138,13 +138,27 @@ const BROWSER_CURVES: &str = "X25519MLKEM768:X25519:P-256";
 ///
 /// Имя ищется один раз за запуск: страница весит больше мегабайта, а перебору
 /// стратегий она нужна на каждом шаге.
-fn video_host() -> Option<&'static str> {
-    static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    HOST.get_or_init(|| {
-        let page = curl(&[WATCH_URL], Duration::from_secs(20))?;
-        find_video_host(&page)
-    })
-    .as_deref()
+/// Насколько долго держим найденный узел CDN.
+///
+/// Раньше он запоминался навсегда (OnceLock). В разовом запуске это незаметно,
+/// а сторож живёт неделями одним процессом — и всю неделю спрашивал один и тот
+/// же узел, выбранный при старте. Узлов за именем сотни, перекрыты они
+/// вразнобой: попался живой — проверка вечно зелёная, попался мёртвый — вечно
+/// красная. И то и другое к делу отношения не имеет.
+const HOST_TTL: Duration = Duration::from_secs(30 * 60);
+
+fn video_host() -> Option<String> {
+    static HOST: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+    let mut держим = HOST.lock().ok()?;
+    if let Some((host, взят)) = держим.as_ref()
+        && взят.elapsed() < HOST_TTL
+    {
+        return Some(host.clone());
+    }
+    let page = curl(&[WATCH_URL], Duration::from_secs(20))?;
+    let host = find_video_host(&page)?;
+    *держим = Some((host.clone(), Instant::now()));
+    Some(host)
 }
 
 /// Первое имя краевого сервера в тексте страницы.

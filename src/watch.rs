@@ -24,6 +24,23 @@ const TARGETS: [&str; 2] = [
     "https://discord.com/api/v9/gateway",
 ];
 
+/// Узлы, с которых идёт само видео ютуба.
+///
+/// Страница `www.youtube.com` открывается и тогда, когда видео уже не играет:
+/// режут не её, а CDN. Сторож, глядя только на страницу, честно докладывал
+/// «всё открывается», пока ютуб стоял колом. Поэтому CDN проверяется отдельно.
+///
+/// Имён несколько не для надёжности связи, а потому что за одним именем стоят
+/// сотни узлов в разных странах, и DNS отдаёт то перекрытый адрес, то живой.
+/// По одному имени показания скачут без всякой связи с тем, играет видео или
+/// нет.
+const CDN: [&str; 4] = [
+    "https://rr1---sn-4g5e6nzz.googlevideo.com/generate_204",
+    "https://rr2---sn-4g5ednse.googlevideo.com/generate_204",
+    "https://rr4---sn-4g5e6nz7.googlevideo.com/generate_204",
+    "https://redirector.googlevideo.com/generate_204",
+];
+
 pub fn log_path() -> std::path::PathBuf {
     state_dir().join("watch.log")
 }
@@ -101,6 +118,19 @@ pub fn notify(text: &str) {
 fn alert(text: &str) {
     note(text);
     notify(text);
+}
+
+/// Доля узлов CDN, ниже которой считаем путь до видео перекрытым.
+const CDN_MIN: usize = 60;
+
+/// Пробивается ли путь до видео. Не «хоть один ответил» и не «ответили все»:
+/// часть узлов перекрыта всегда, а совсем ложится путь редко. Меряем долю.
+fn video_reachable() -> bool {
+    let live = CDN
+        .iter()
+        .filter(|url| probe::reachable(url, Duration::from_secs(6)))
+        .count();
+    live * 100 / CDN.len() >= CDN_MIN
 }
 
 fn everything_reachable() -> bool {
@@ -189,17 +219,28 @@ pub fn tick(cfg: &Config) -> bool {
     }
 
     // 3. Работает, но пропускает ли?
-    if everything_reachable() {
+    //
+    // Сайты и видео проверяются порознь: страница ютуба может открываться, а
+    // видео с неё — уже нет. Раньше лечение в этом случае не запускалось
+    // вовсе, потому что проверка видела только страницу.
+    let сайты = everything_reachable();
+    let видео = video_reachable();
+    if сайты && видео {
         return acted;
     }
+    if сайты {
+        note("сайты открываются, а путь до видео перекрыт");
+    } else {
+        note("сайты не открываются");
+    }
 
-    note("сайты не открываются — перезапускаю движок");
+    note("перезапускаю движок");
     if let Err(e) = z.restart() {
         note(&format!("перезапуск не удался: {e}"));
         return true;
     }
     std::thread::sleep(Duration::from_secs(2));
-    if everything_reachable() {
+    if everything_reachable() && video_reachable() {
         note("после перезапуска всё открывается");
         return true;
     }
