@@ -1,0 +1,50 @@
+name: check
+
+# Релиз собирается только по тегу, и до сих пор поломка под macOS или Windows
+# всплывала бы там же — в момент выкатки. Эта сборка гоняет все три системы на
+# каждый пуш, чтобы платформенная ветка кода ломалась заметно и заранее.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - name: Сборка
+        # Тот же минимум системы, что и в релизе: иначе проверка зелёная, а
+        # выпущенный бинарь на Big Sur не запускается.
+        shell: bash
+        run: |
+          set -eux
+          [ "${{ matrix.name }}" = macos ] && export MACOSX_DEPLOYMENT_TARGET=11.0
+          cargo build --release --locked
+      - name: Тесты
+        run: cargo test --locked
+      - name: Придирки
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Пульт запускается и отвечает
+        # Дымовая проверка: бинарь стартует на этой системе и не падает на
+        # разборе аргументов. Сеть тут не трогаем — на раннере её всё равно
+        # не проверить честно.
+        shell: bash
+        run: |
+          set -eux
+          bin=target/release/netpult
+          [ "${{ matrix.name }}" = windows ] && bin=target/release/netpult.exe
+          "$bin" version
+          "$bin" help
