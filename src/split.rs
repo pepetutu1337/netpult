@@ -79,16 +79,14 @@ fn log_decision(host: &str, via_node: bool) {
     let path = log_path();
 
     // Раз в сотню запросов подрезаем хвост, оставляя последние ~500 строк.
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > 200_000 {
-            if let Ok(text) = std::fs::read_to_string(&path) {
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > 200_000
+            && let Ok(text) = std::fs::read_to_string(&path) {
                 let tail: Vec<&str> = text.lines().rev().take(500).collect();
                 let trimmed: String =
                     tail.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n";
                 std::fs::write(&path, trimmed).ok();
             }
-        }
-    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         writeln!(f, "{stamp}  {mark}  {host}").ok();
     }
@@ -121,12 +119,10 @@ pub fn update_geoblock() -> Result<usize, String> {
         if let Ok(out) = std::process::Command::new("curl")
             .args(["-fsSL", "--max-time", "30", url])
             .output()
-        {
-            if out.status.success() && out.stdout.len() > 1000 {
+            && out.status.success() && out.stdout.len() > 1000 {
                 body = String::from_utf8_lossy(&out.stdout).into_owned();
                 break;
             }
-        }
     }
     if body.is_empty() {
         return Err("не скачался список геоблока (все зеркала молчат)".into());
@@ -196,11 +192,10 @@ pub fn serve(cfg: &Config) -> Result<(), String> {
         let upstream = upstream.clone();
         let list = std::sync::Arc::clone(&list);
         std::thread::spawn(move || {
-            if let Err(e) = handle(client, &upstream, &list) {
-                if std::env::var_os("NETPULT_DEBUG").is_some() {
+            if let Err(e) = handle(client, &upstream, &list)
+                && std::env::var_os("NETPULT_DEBUG").is_some() {
                     eprintln!("сплит: соединение оборвалось: {e}");
                 }
-            }
         });
     }
     Ok(())

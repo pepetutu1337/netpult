@@ -174,12 +174,11 @@ pub fn apply(cfg: &Config) -> Result<Vec<String>, String> {
     let mut done = Vec::new();
     let z = Zapret::new(cfg);
 
-    if let Some(strategy) = &profile.strategy {
-        if z.strategy().as_deref() != Some(strategy.as_str()) {
+    if let Some(strategy) = &profile.strategy
+        && z.strategy().as_deref() != Some(strategy.as_str()) {
             z.set_strategy(strategy)?;
             done.push(format!("стратегия {strategy}"));
         }
-    }
 
     match (profile.zapret, z.state()) {
         (true, State::Off) => {

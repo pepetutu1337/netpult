@@ -97,11 +97,10 @@ fn foreign_tunnels(cfg: &Config) -> Vec<String> {
 
 fn system_proxy() -> Option<String> {
     for key in ["all_proxy", "https_proxy", "http_proxy", "ALL_PROXY", "HTTPS_PROXY"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty() {
                 return Some(format!("{key}={value}"));
             }
-        }
     }
     None
 }
@@ -117,11 +116,10 @@ fn nameservers() -> Vec<String> {
         .collect();
     // 127.0.0.53 — это заглушка systemd-resolved, а не настоящий сервер: за
     // ней стоит либо роутер, либо DoH, и разница тут как раз важна.
-    if listed.iter().all(|ip| ip.starts_with("127.")) {
-        if let Some(real) = resolved_upstream() {
+    if listed.iter().all(|ip| ip.starts_with("127."))
+        && let Some(real) = resolved_upstream() {
             return real;
         }
-    }
     listed
 }
 
@@ -314,14 +312,13 @@ fn conflicts(
                 .to_string(),
         );
     }
-    if let Some(exit) = exit {
-        if tunnel_on && !is_tunnel(&exit.interface) {
+    if let Some(exit) = exit
+        && tunnel_on && !is_tunnel(&exit.interface) {
             out.push(format!(
                 "туннель поднят, но трафик уходит через {} — маршрут он на себя не забрал",
                 exit.interface
             ));
         }
-    }
     out
 }
 

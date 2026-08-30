@@ -118,7 +118,6 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
             &crate::config::state_dir().join("cache.db").to_string_lossy()
         )
         .trim_matches('"')
-        .to_string()
     ))
 }
 
