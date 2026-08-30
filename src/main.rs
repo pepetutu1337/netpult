@@ -142,6 +142,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("vpn auto", "выбирать самую быструю самому"),
         ("vpn update", "перечитать подписку"),
         ("vpn sync", "обновить ноды в конфиге ядра на месте"),
+        ("vpn add", "добавить свои ноды из json-файла"),
+        ("vpn bank", "запас нод: что лежит и когда отвечало"),
+        ("vpn bank rm", "убрать ноду из запаса"),
         ("vpn sub", "загрузить подписку по ссылке"),
         ("vpn core install", "поставить ядро sing-box"),
         ("vpn info", "подписка: трафик, срок, страница устройств"),
@@ -307,6 +310,23 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 Ok(())
             }
             Some(other) => Err(format!("net vpn core install, а не «{other}»")),
+        },
+        // Свои ноды из файла: тот же разбор, что и у подписки, поэтому годится
+        // и выгрузка sing-box, и xray, и просто список ссылок.
+        Some("add") => match rest.get(1).copied() {
+            Some(path) => vpn_add(path),
+            None => Err("нужен файл: net vpn add <файл.json>".into()),
+        },
+        Some("bank") => match rest.get(1).copied() {
+            None | Some("list") => vpn_bank_list(),
+            Some("rm") | Some("del") => {
+                let what = rest[2..].join(" ");
+                if what.trim().is_empty() {
+                    return Err("что убрать: net vpn bank rm <имя|адрес:порт>".into());
+                }
+                vpn_bank_rm(&what)
+            }
+            Some(other) => Err(format!("net vpn bank [list|rm], а не «{other}»")),
         },
         Some("info") => vpn_info(),
         Some("hwid") => vpn_hwid(rest.get(1).copied()),
@@ -513,17 +533,146 @@ fn print_core_status() {
     }
 }
 
+/// Добавить ноды из файла. Разбор тот же, что у подписки, поэтому подойдёт и
+/// выгрузка sing-box, и конфиг xray, и просто список ссылок построчно.
+fn vpn_add(path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("не прочитать {path}: {e}"))?;
+    let found = sub::parse(&text)?;
+    if found.is_empty() {
+        return Err("в файле не нашлось ни одной ноды".into());
+    }
+    let mut bank = sub::load_bank();
+    let added = sub::add_missing(&mut bank, &found);
+    sub::save_bank(&bank)?;
+    if added == 0 {
+        println!("{YELLOW}Все {} нод уже в запасе{RESET}", found.len());
+        return Ok(());
+    }
+    println!("{GREEN}Добавлено в запас: {added}{RESET}");
+    println!("{DIM}В работу попадут при следующем net vpn update{RESET}");
+    Ok(())
+}
+
+/// Сколько прошло с отклика — словами, потому что «1788063000» никому ничего
+/// не говорит.
+fn когда(last_ok: Option<u64>) -> String {
+    let Some(then) = last_ok else {
+        return "ни разу".to_string();
+    };
+    let прошло = sub::now_secs().saturating_sub(then);
+    match прошло {
+        0..=300 => "только что".to_string(),
+        301..=5400 => format!("{} мин назад", прошло / 60),
+        5401..=172_800 => format!("{} ч назад", прошло / 3600),
+        _ => format!("{} дн назад", прошло / 86_400),
+    }
+}
+
+fn vpn_bank_list() -> Result<(), String> {
+    let bank = sub::load_bank();
+    if bank.is_empty() {
+        println!("{DIM}Запас пуст — он наполняется при net vpn update{RESET}");
+        return Ok(());
+    }
+    let живые = sub::load_nodes().unwrap_or_default();
+    let ширина = bank
+        .iter()
+        .map(|k| k.node.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 32);
+    println!("{BOLD}ЗАПАС НОД{RESET}  {DIM}всего {}{RESET}\n", bank.len());
+    for kept in &bank {
+        let в_работе = живые.iter().any(|n| n.name == kept.node.name);
+        let метка = if в_работе {
+            format!("{GREEN}●{RESET}")
+        } else {
+            format!("{DIM}○{RESET}")
+        };
+        println!(
+            "  {метка} {}  {DIM}{}{RESET}  {DIM}отвечала: {}{RESET}",
+            picker::fit(&kept.node.name, ширина),
+            picker::fit(&sub::place(&kept.node), 24),
+            когда(kept.last_ok)
+        );
+    }
+    println!("\n{DIM}● в работе · ○ лежит в запасе{RESET}");
+    println!("{DIM}Убрать: net vpn bank rm <имя|адрес:порт>{RESET}");
+    Ok(())
+}
+
+fn vpn_bank_rm(what: &str) -> Result<(), String> {
+    let mut bank = sub::load_bank();
+    let gone = sub::drop_from_bank(&mut bank, what);
+    if gone.is_empty() {
+        return Err(format!("в запасе нет «{what}» — смотри net vpn bank"));
+    }
+    sub::save_bank(&bank)?;
+    println!("{GREEN}Убрано из запаса: {}{RESET}", gone.join(", "));
+    println!("{DIM}Из работы уйдёт при следующем net vpn update{RESET}");
+    Ok(())
+}
+
 fn vpn_subscribe(url: &str) -> Result<(), String> {
     println!("Забираю подписку...");
     let mut nodes = sub::fetch(url, Duration::from_secs(30))?;
+
+    // Провайдер время от времени выводит рабочие ноды из подписки. Такую
+    // оставляем себе — но только если она ещё отвечает: мёртвую тащить в
+    // конфиг незачем, а в запасе она полежит и, если оживёт, вернётся сама
+    // на следующем обновлении.
+    let mut bank = sub::load_bank();
+    let dropped: Vec<sub::Kept> = bank
+        .iter()
+        .filter(|kept| {
+            !nodes
+                .iter()
+                .any(|fresh| sub::place(fresh) == sub::place(&kept.node))
+        })
+        .cloned()
+        .collect();
+    let mut revived = 0;
+    if !dropped.is_empty() {
+        println!("Проверяю {} нод, которых больше нет в подписке…", dropped.len());
+        for kept in &dropped {
+            if sub::responds(&kept.node, Duration::from_secs(3)) {
+                nodes.push(kept.node.clone());
+                revived += 1;
+            }
+        }
+    }
+
     sub::dedupe_names(&mut nodes);
     let config = singbox::build_config(&nodes)?;
     let path = sub::save(url, &nodes, &config)?;
+
+    // В запас кладём всё, что видели: и свежее, и прежнее. Молчащая сегодня
+    // нода завтра оживает, и терять её адрес не нужно. Заодно отмечаем время
+    // отклика — по нему потом видно, когда нода подавала признаки жизни.
+    let живые: Vec<String> = nodes.iter().map(sub::place).collect();
+    let сейчас = sub::now_secs();
+    sub::add_missing(&mut bank, &nodes);
+    for kept in bank.iter_mut() {
+        if живые.contains(&sub::place(&kept.node)) {
+            kept.last_ok = Some(сейчас);
+        }
+    }
+    sub::save_bank(&bank)?;
+
     println!(
         "{GREEN}Разобрано нод: {}{RESET}\nКонфиг: {}",
         nodes.len(),
         path.display()
     );
+    if revived > 0 {
+        println!(
+            "{DIM}из них оставлено своих, выведенных из подписки: {revived}{RESET}"
+        );
+    }
+    let asleep = bank.len().saturating_sub(nodes.len());
+    if asleep > 0 {
+        println!("{DIM}в запасе лежит молчащих: {asleep} (вернутся, когда оживут){RESET}");
+    }
     println!("Список нод — net vpn nodes");
     Ok(())
 }

@@ -1038,6 +1038,139 @@ pub fn subscription_path() -> std::path::PathBuf {
 
 /// Сохранить конфиг движка, список имён нод и саму ссылку — по ней подписка
 /// обновляется потом одной командой.
+/// Свой запас нод: всё, что когда-либо приходило в подписке или добавлялось
+/// руками из файла.
+///
+/// Провайдер время от времени выводит рабочие ноды из подписки. Раз они ещё
+/// отвечают, терять их незачем — запас живёт отдельно от подписки и переживает
+/// её обновление. Хранится в том же виде, в каком sing-box читает outbounds:
+/// пишем `to_outbound`, читаем своим же разбором подписки, без отдельного
+/// формата и отдельных ошибок.
+pub fn bank_path() -> std::path::PathBuf {
+    crate::config::state_dir().join("nodes.json")
+}
+
+/// Нода в запасе и когда она последний раз отвечала.
+#[derive(Debug, Clone)]
+pub struct Kept {
+    pub node: Node,
+    /// Отметка времени последнего успешного отклика, секунды эпохи.
+    pub last_ok: Option<u64>,
+}
+
+/// Ключ ноды: адрес с портом. Имя для этого не годится — провайдер
+/// переименовывает ноды между выгрузками.
+pub fn place(node: &Node) -> String {
+    format!("{}:{}", node.server, node.port)
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Записать запас: сами ноды в виде outbounds плюс отметки откликов.
+///
+/// Формат нарочно совпадает с выгрузкой sing-box — читаем его тем же разбором
+/// подписки, что и всё остальное, без отдельного парсера и отдельных ошибок.
+/// Отметки лежат рядом отдельным полем, движку они не мешают.
+pub fn save_bank(entries: &[Kept]) -> Result<(), String> {
+    crate::config::state_dir_ensure().map_err(|e| format!("не создать каталог состояния: {e}"))?;
+    let body: Vec<String> = entries.iter().map(|k| k.node.to_outbound()).collect();
+    let seen: Vec<String> = entries
+        .iter()
+        .filter_map(|k| k.last_ok.map(|t| format!("{}: {t}", json::escape(&place(&k.node)))))
+        .collect();
+    let text = format!(
+        "{{\"outbounds\": [{}], \"seen\": {{{}}}}}",
+        body.join(", "),
+        seen.join(", ")
+    );
+    std::fs::write(bank_path(), text).map_err(|e| format!("не записать запас нод: {e}"))
+}
+
+/// Запас с диска. Нет файла или он битый — считаем, что запаса нет: это не
+/// повод рушить обновление подписки.
+pub fn load_bank() -> Vec<Kept> {
+    let Ok(text) = std::fs::read_to_string(bank_path()) else {
+        return Vec::new();
+    };
+    let Ok(nodes) = parse(&text) else {
+        return Vec::new();
+    };
+    let seen = Json::parse(&text)
+        .ok()
+        .and_then(|j| j.get("seen").cloned());
+    nodes
+        .into_iter()
+        .map(|node| {
+            let last_ok = seen
+                .as_ref()
+                .and_then(|s| s.get(&place(&node)))
+                .and_then(|v| match v {
+                    crate::json::Json::Num(n) => Some(*n as u64),
+                    _ => None,
+                });
+            Kept { node, last_ok }
+        })
+        .collect()
+}
+
+/// Дописать в запас ноды, которых там ещё нет.
+pub fn add_missing(bank: &mut Vec<Kept>, extra: &[Node]) -> usize {
+    let mut added = 0;
+    for node in extra {
+        if bank.iter().any(|k| place(&k.node) == place(node)) {
+            continue;
+        }
+        bank.push(Kept {
+            node: node.clone(),
+            last_ok: None,
+        });
+        added += 1;
+    }
+    added
+}
+
+/// Выкинуть из запаса по имени или по адресу с портом. Возвращает выкинутые.
+pub fn drop_from_bank(bank: &mut Vec<Kept>, what: &str) -> Vec<String> {
+    let want = what.trim();
+    let mut gone = Vec::new();
+    bank.retain(|k| {
+        let hit = k.node.name == want || place(&k.node) == want;
+        if hit {
+            gone.push(k.node.name.clone());
+        }
+        !hit
+    });
+    gone
+}
+
+/// Отвечает ли нода.
+///
+/// Сначала спрашиваем ядро: если оно поднято и знает эту ноду, clash API даст
+/// честную задержку через сам туннель. Ядра нет — стучимся в адрес с портом
+/// напрямую. Это слабее полноценной проверки (сервер может быть жив, а доступ
+/// по нему уже отозван), но отсекает главное: ноды, чей сервер исчез или
+/// закрыл порт.
+pub fn responds(node: &Node, timeout: std::time::Duration) -> bool {
+    if crate::singbox::delay(&node.name, timeout.as_millis() as u32).is_some() {
+        return true;
+    }
+    let target = format!("{}:{}", node.server, node.port);
+    let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&target) else {
+        return false;
+    };
+    for addr in addrs {
+        if std::net::TcpStream::connect_timeout(&addr, timeout).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn save(url: &str, nodes: &[Node], config: &str) -> Result<std::path::PathBuf, String> {
     crate::config::state_dir_ensure().map_err(|e| format!("не создать каталог состояния: {e}"))?;
     let path = config_path();
@@ -1073,6 +1206,42 @@ pub fn load_nodes() -> Result<Vec<SavedNode>, String> {
 
 pub struct SavedNode {
     pub name: String,
+}
+
+
+#[cfg(test)]
+mod bank_tests {
+    use super::*;
+
+    fn нода(name: &str, server: &str, port: u16) -> Node {
+        let mut n = parse_link(&format!("vless://uuid@{server}:{port}#{name}")).unwrap();
+        n.name = name.to_string();
+        n
+    }
+
+    #[test]
+    fn запас_узнаёт_ноду_по_адресу_а_не_по_имени() {
+        let mut bank = vec![Kept { node: нода("Старое имя", "a.example", 443), last_ok: None }];
+        // Та же машина под новым именем — дубля быть не должно.
+        let added = add_missing(&mut bank, &[нода("Новое имя", "a.example", 443)]);
+        assert_eq!(added, 0);
+        assert_eq!(bank.len(), 1);
+        // Другой порт — уже другая нода.
+        let added = add_missing(&mut bank, &[нода("Другая", "a.example", 8443)]);
+        assert_eq!(added, 1);
+    }
+
+    #[test]
+    fn из_запаса_убирают_и_по_имени_и_по_адресу() {
+        let mut bank = vec![
+            Kept { node: нода("Первая", "a.example", 443), last_ok: None },
+            Kept { node: нода("Вторая", "b.example", 443), last_ok: None },
+        ];
+        assert_eq!(drop_from_bank(&mut bank, "Первая"), vec!["Первая"]);
+        assert_eq!(drop_from_bank(&mut bank, "b.example:443"), vec!["Вторая"]);
+        assert!(bank.is_empty());
+        assert!(drop_from_bank(&mut bank, "чего нет").is_empty());
+    }
 }
 
 #[cfg(test)]
