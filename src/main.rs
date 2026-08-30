@@ -1080,6 +1080,12 @@ fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some("off") => {
+            if !dns::поддержано() {
+                return Err(format!(
+                    "на {} свой резолвер не подводился — и снимать нечего",
+                    std::env::consts::OS
+                ));
+            }
             for шаг in dns::off()? {
                 println!("  {шаг}");
             }
@@ -1095,6 +1101,16 @@ fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
 }
 
 fn dns_status() {
+    if !dns::поддержано() {
+        println!(
+            "{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {DIM}на {} ещё не подведён{RESET}",
+            std::env::consts::OS
+        );
+        println!("{DIM}Сам резолвер пошёл бы и тут, не хватает способа сказать системе{RESET}");
+        println!("{DIM}«спрашивай его»: на Linux это systemd-resolved, тут нужен свой путь.{RESET}");
+        println!("{DIM}Пока DNS шифруется под поднятым туннелем: net vpn on{RESET}");
+        return;
+    }
     let state = dns::state();
     let hooked = dns::подключён();
     let (color, text) = match (&state, hooked) {
@@ -1120,6 +1136,10 @@ fn dns_status() {
 /// отвечает дольше заграничного. Зато видно соединение на 443 к DoH-серверу
 /// и запрос к российскому резолверу — вот это и есть развилка.
 fn dns_test() {
+    if !dns::поддержано() {
+        dns_status();
+        return;
+    }
     println!("{BOLD}ШИФРОВАННЫЙ DNS — ПРОВЕРКА{RESET}\n");
 
     let подключена = dns::подключён();
