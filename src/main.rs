@@ -2,6 +2,7 @@
 
 mod config;
 mod json;
+mod network;
 mod picker;
 mod probe;
 mod progress;
@@ -592,7 +593,7 @@ fn vpn_add(path: &str) -> Result<(), String> {
 
 /// Сколько прошло с отклика — словами, потому что «1788063000» никому ничего
 /// не говорит.
-fn когда(last_ok: Option<u64>) -> String {
+pub(crate) fn когда(last_ok: Option<u64>) -> String {
     let Some(then) = last_ok else {
         return "ни разу".to_string();
     };

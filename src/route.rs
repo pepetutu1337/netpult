@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::probe;
+use crate::profile;
 use crate::singbox;
 use crate::zapret::{self, Zapret};
 use crate::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
@@ -211,6 +212,21 @@ pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
     if !dns.is_empty() {
         println!("  DNS         {}", dns.join(", "));
     }
+    // Без имени сети весь отчёт одинаков дома и в кафе: там и там выход через
+    // шлюз, там и там российский адрес. Разница только в том, что делает
+    // роутер, — а это к сети и привязано.
+    let сеть = profile::current_network();
+    match &сеть {
+        Some(name) => {
+            let знакомая = if crate::network::known(Some(name)).is_some() {
+                String::new()
+            } else {
+                format!("  {DIM}(в первый раз){RESET}")
+            };
+            println!("  Сеть        {name}{знакомая}");
+        }
+        None => println!("  Сеть        {DIM}не опознана{RESET}"),
+    }
 
     println!("\n{BOLD}  На этом компьютере{RESET}");
     mark(zapret_on, &format!(
@@ -241,16 +257,18 @@ pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
 
     println!("\n{BOLD}  Со стороны сети{RESET}");
     if zapret_on || tunnel_on || !foreign.is_empty() {
-        println!(
-            "  {DIM}пока свой обход включён, чужой не разглядеть — весь трафик и так исправлен{RESET}"
-        );
         if deep {
-            deep_check(cfg, zapret_on, tunnel_on)?;
+            deep_check(cfg, zapret_on, tunnel_on, сеть.as_deref())?;
         } else {
-            println!("  {DIM}проверить наверняка: net path --deep (ненадолго выключит свой обход){RESET}");
+            // Прямо сейчас не разглядеть, зато можно сказать, чем эта сеть
+            // оказалась в прошлый раз. Без этого отчёт дома и в чужой сети
+            // выглядит одинаково, а значит не отвечает на главный вопрос.
+            вспомнить(сеть.as_deref());
+            println!("  {DIM}проверить сейчас: net path --deep (ненадолго выключит свой обход){RESET}");
         }
     } else {
         let upstream = probe_blocked();
+        crate::network::remember(сеть.as_deref(), upstream);
         if upstream {
             println!("  {GREEN}● обход стоит выше — заблокированное открывается без всякого пульта{RESET}");
             println!("  {DIM}обычно это роутер или сам провайдер. Свой zapret тут не нужен.{RESET}");
@@ -270,6 +288,33 @@ pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Что известно про эту сеть с прошлого раза. Вердикт всегда идёт с датой:
+/// роутер мог сломаться со вчера, и старому «обход выше есть» верить нельзя.
+fn вспомнить(сеть: Option<&str>) {
+    let Some(name) = сеть else {
+        println!("  {DIM}сеть не опознана — сказать про неё нечего{RESET}");
+        return;
+    };
+    let Some(seen) = crate::network::known(Some(name)) else {
+        println!(
+            "  {YELLOW}в этой сети пульт ещё не проверялся — про обход выше ничего не известно{RESET}"
+        );
+        return;
+    };
+    let давность = crate::когда(Some(seen.checked));
+    if seen.upstream {
+        println!("  {GREEN}● в прошлый раз обход был выше — проверено {давность}{RESET}");
+        if seen.устарел() {
+            println!("  {DIM}давно; свой zapret можно выключить, но лучше сперва --deep{RESET}");
+        } else {
+            println!("  {DIM}свой zapret тут, скорее всего, лишний: net off{RESET}");
+        }
+    } else {
+        println!("  {RED}○ в прошлый раз обхода выше не было — проверено {давность}{RESET}");
+        println!("  {DIM}свой обход в этой сети нужен{RESET}");
+    }
+}
+
 fn mark(on: bool, text: &str) {
     let (color, dot) = if on { (GREEN, "●") } else { (DIM, "○") };
     println!("    {color}{dot} {text}{RESET}");
@@ -287,7 +332,12 @@ fn probe_blocked() -> bool {
 
 /// Проверка с временно снятым своим обходом: иначе не отличить, кто именно
 /// чинит трафик — пульт или роутер.
-fn deep_check(cfg: &Config, zapret_on: bool, tunnel_on: bool) -> Result<(), String> {
+fn deep_check(
+    cfg: &Config,
+    zapret_on: bool,
+    tunnel_on: bool,
+    сеть: Option<&str>,
+) -> Result<(), String> {
     if tunnel_on {
         return Err("сначала сними туннель: net vpn off — из-под него сети не видно".into());
     }
@@ -298,6 +348,7 @@ fn deep_check(cfg: &Config, zapret_on: bool, tunnel_on: bool) -> Result<(), Stri
         std::thread::sleep(Duration::from_millis(700));
     }
     let upstream = probe_blocked();
+    crate::network::remember(сеть, upstream);
     if zapret_on {
         println!("  {DIM}возвращаю как было...{RESET}");
         z.start()?;
