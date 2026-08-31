@@ -24,22 +24,22 @@ const TARGETS: [&str; 2] = [
     "https://discord.com/api/v9/gateway",
 ];
 
-/// Узлы, с которых идёт само видео ютуба.
+/// Пробивается ли путь до видео.
 ///
-/// Страница `www.youtube.com` открывается и тогда, когда видео уже не играет:
-/// режут не её, а CDN. Сторож, глядя только на страницу, честно докладывал
-/// «всё открывается», пока ютуб стоял колом. Поэтому CDN проверяется отдельно.
-///
-/// Имён несколько не для надёжности связи, а потому что за одним именем стоят
-/// сотни узлов в разных странах, и DNS отдаёт то перекрытый адрес, то живой.
-/// По одному имени показания скачут без всякой связи с тем, играет видео или
-/// нет.
-const CDN: [&str; 4] = [
-    "https://rr1---sn-4g5e6nzz.googlevideo.com/generate_204",
-    "https://rr2---sn-4g5ednse.googlevideo.com/generate_204",
-    "https://rr4---sn-4g5e6nz7.googlevideo.com/generate_204",
-    "https://redirector.googlevideo.com/generate_204",
-];
+/// Имена краевых узлов тут раньше были вписаны списком (`rr1---sn-...`). Это
+/// та же ошибка, от которой предостерегает `probe::video`: имя выдаётся под
+/// сеть и под сессию, соседний узел из той же группы резолвится и молчит. На
+/// чужой машине такой список даёт вечное «видео перекрыто» на исправном
+/// обходе — и сторож раз за разом перебирает стратегии впустую. Поэтому узел
+/// берём тот, который ютуб выдал этой машине, а не угаданный.
+fn video_reachable() -> bool {
+    let v = probe::video(Duration::from_secs(8));
+    // Узел не нашёлся — судить не о чем, врать про поломку незачем.
+    if !v.checked {
+        return true;
+    }
+    v.plain
+}
 
 pub fn log_path() -> std::path::PathBuf {
     state_dir().join("watch.log")
@@ -120,23 +120,15 @@ fn alert(text: &str) {
     notify(text);
 }
 
-/// Доля узлов CDN, ниже которой считаем путь до видео перекрытым.
-const CDN_MIN: usize = 60;
-
-/// Пробивается ли путь до видео. Не «хоть один ответил» и не «ответили все»:
-/// часть узлов перекрыта всегда, а совсем ложится путь редко. Меряем долю.
-fn video_reachable() -> bool {
-    let live = CDN
-        .iter()
-        .filter(|url| probe::reachable(url, Duration::from_secs(6)))
-        .count();
-    live * 100 / CDN.len() >= CDN_MIN
-}
-
+/// Открываются ли сайты вообще.
+///
+/// Именно «хоть один», а не «все»: адреса разных владельцев, и у любого бывает
+/// своя авария. Требование «все разом» превращало получасовой сбой дискорда в
+/// перезапуск движка и получасовой перебор стратегий на ровном месте.
 fn everything_reachable() -> bool {
     TARGETS
         .iter()
-        .all(|url| probe::reachable(url, Duration::from_secs(8)))
+        .any(|url| probe::reachable(url, Duration::from_secs(8)))
 }
 
 /// Один проход сторожа. Возвращает `true`, если пришлось вмешаться.
@@ -175,6 +167,59 @@ fn follow_network(cfg: &Config) -> bool {
     }
 }
 
+/// Свой туннель поднят.
+///
+/// Раньше сторож на этом просто выходил: zapret тут и правда трогать нельзя.
+/// Но и делать вид, что всё хорошо, нельзя тоже — нода умирает молча, и о том,
+/// что «ничего не работает», человек узнаёт сам, когда полезет проверять. При
+/// поднятом туннеле трафик идёт через ноду, значит обычная проверка адреса —
+/// это и есть проверка ноды: то, что не прошло у сторожа, не пройдёт и у
+/// человека.
+fn tunnel_tick() -> bool {
+    if everything_reachable() {
+        return false;
+    }
+    let было = crate::singbox::active_node()
+        .map(|(n, _)| n)
+        .unwrap_or_else(|| "?".into());
+    note(&format!("через ноду «{было}» сайты не открываются — ищу живую"));
+
+    // Пусть движок сам перемерит группу и переставит автоподбор на живую.
+    crate::singbox::measure_group(crate::singbox::AUTO, 5000);
+    if crate::singbox::select(crate::singbox::AUTO).is_err() {
+        note("не удалось переключиться на автоподбор");
+        return true;
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    if everything_reachable() {
+        let стало = crate::singbox::active_node()
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| "?".into());
+        alert(&format!("нода «{было}» перестала пропускать трафик — перешёл на «{стало}»"));
+    } else {
+        alert("ни одна нода не пропускает трафик — проверь подписку: net vpn nodes");
+    }
+    true
+}
+
+/// Как часто позволено перебирать стратегии.
+///
+/// Подбор идёт минутами и на это время рвёт связь. Без выдержки сторож,
+/// упершийся в поломку, которую стратегией не лечат (лёг провайдер, кончился
+/// трафик), гонял бы перебор каждые десять минут круглосуточно.
+const TUNE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn tune_stamp() -> std::path::PathBuf {
+    state_dir().join("tune.last")
+}
+
+fn tune_allowed() -> bool {
+    match std::fs::metadata(tune_stamp()).and_then(|m| m.modified()) {
+        Ok(t) => t.elapsed().map(|e| e > TUNE_COOLDOWN).unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
 pub fn tick(cfg: &Config) -> bool {
     maybe_update_geoblock();
     let mut acted = follow_network(cfg);
@@ -199,7 +244,7 @@ pub fn tick(cfg: &Config) -> bool {
     // здорового — перезапускает движок по кругу, пока systemd не упрётся в
     // предел запусков и не пометит службу упавшей.
     if crate::singbox::Core::state_now() == crate::singbox::State::Up {
-        return acted;
+        return tunnel_tick() || acted;
     }
     if z.state() == State::Missing {
         return acted;
@@ -246,7 +291,13 @@ pub fn tick(cfg: &Config) -> bool {
     }
 
     // 4. Дело в стратегии.
+    if !tune_allowed() {
+        note("не помогло, но стратегию уже подбирали недавно — жду");
+        return true;
+    }
     note("не помогло — подбираю стратегию");
+    std::fs::create_dir_all(state_dir()).ok();
+    std::fs::write(tune_stamp(), "").ok();
     match tune::run(cfg, &tune::Options { full: false, verbose: false }) {
         Ok(best) => alert(&format!(
             "стратегия сменена на {} ({}, {:.0} КБ/с)",
