@@ -247,6 +247,7 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
     restart(&plan.restart)?;
     phase("проверяю связь наружу");
     if alive(&plan.probe_proxy) {
+        stamp_success();
         return Ok(Report {
             nodes: count,
             kept,
@@ -268,6 +269,37 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
         rolled_back: true,
         note: "после обновления связи не было — вернул прежний конфиг".into(),
     })
+}
+
+/// Отметка последнего удачного обновления нод.
+///
+/// Молчащая подписка — самый тихий способ однажды остаться без интернета.
+/// Ноды в конфиге живут дальше и работают, пока провайдер не сменит им ключи
+/// при очередной ротации, и тогда умирают все разом. Между «подписка перестала
+/// отвечать» и «ничего не работает» проходят недели, и всё это время ошибка
+/// видна только в выводе команды, которую в это время никто не запускает.
+pub fn stamp_path() -> PathBuf {
+    crate::config::state_dir().join("sync.stamp")
+}
+
+fn stamp_success() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::create_dir_all(crate::config::state_dir());
+    let _ = std::fs::write(stamp_path(), now.to_string());
+}
+
+/// Сколько суток назад ноды обновлялись удачно. `None` — ни разу.
+pub fn days_since_sync() -> Option<u64> {
+    let text = std::fs::read_to_string(stamp_path()).ok()?;
+    let then: u64 = text.trim().parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(now.saturating_sub(then) / 86_400)
 }
 
 /// Теги всех нод, которые уже есть в конфиге.

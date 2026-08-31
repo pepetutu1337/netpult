@@ -104,12 +104,19 @@ pub fn all_list_paths() -> Vec<std::path::PathBuf> {
 
 /// Источники автосписка ушедших из РФ сервисов (itdoginfo/allow-domains).
 ///
-/// Первым — зеркало jsDelivr: сам GitHub raw в РФ обычно недоступен без обхода,
-/// а CDN проходит. Дальше — запасные на случай, если зеркало приляжет.
+/// Первым — сам GitHub: из РФ он доступен, это проверено запросом с
+/// российского адреса (301 от raw.githubusercontent.com). Раньше первым стояло
+/// зеркало jsDelivr «потому что GitHub недоступен» — неправда, и она стоила
+/// лишней зависимости от чужого CDN на ровном месте.
+///
+/// Зеркала следом: список — единственное, откуда берутся новые уехавшие
+/// сервисы, и его молчание ничем не проявляется. Всё продолжает работать,
+/// просто перестаёт узнавать новое.
 pub const GEOBLOCK_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Categories/geoblock.lst",
     "https://cdn.jsdelivr.net/gh/itdoginfo/allow-domains@main/Categories/geoblock.lst",
     "https://fastly.jsdelivr.net/gh/itdoginfo/allow-domains@main/Categories/geoblock.lst",
-    "https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Categories/geoblock.lst",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/itdoginfo/allow-domains/refs/heads/main/Categories/geoblock.lst",
 ];
 
 /// Тянет автосписок геоблока и сохраняет его. Возвращает число доменов.

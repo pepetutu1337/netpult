@@ -1589,6 +1589,22 @@ pub fn status_lines(cfg: &Config) -> Vec<Status> {
         vpn::State::Off => Status::new(false, "VPN", "ВЫКЛ", ""),
     });
 
+    // Молчащая подписка ничем себя не проявляет: ноды в конфиге работают, пока
+    // провайдер не сменит им ключи при очередной ротации, и тогда ложатся все
+    // разом. Показываем только когда пора беспокоиться — постоянная строка
+    // «последнее обновление такого-то числа» превращается в шум, который
+    // перестают читать раньше, чем он станет важным.
+    if let Some(days) = sync::days_since_sync()
+        && days >= 14
+    {
+        lines.push(Status::new(
+            false,
+            "Подписка",
+            &format!("{days} сут"),
+            "ноды не обновлялись — доживут до ближайшей ротации ключей",
+        ));
+    }
+
     if probe::port_open(cfg.split_port, Duration::from_millis(300)) {
         let node = socks::reachable(&cfg.split_upstream, Duration::from_secs(1));
         lines.push(Status::new(
