@@ -1,8 +1,10 @@
 //! netpult — один пульт для обхода блокировок: zapret, VPN и прокси Telegram.
 
+mod calls;
 mod config;
 mod deps;
 mod dns;
+mod doctor;
 mod json;
 mod network;
 mod picker;
@@ -99,6 +101,8 @@ pub fn dispatch_with(
         "split" => split_command(cfg, &rest),
         "dns" => dns_command(cfg, &rest),
         "deps" | "install" => deps_command(cfg, &rest),
+        "calls" | "звонки" => calls_command(cfg, &rest),
+        "doctor" | "fix" | "осмотр" => doctor::run(cfg, rest.contains(&"--fix") || command == "fix"),
         "watch" => watch_command(cfg, &rest),
         "qr" => show_qr_maybe_png(cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
@@ -853,6 +857,7 @@ fn telegram_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             println!("{RED}Прокси Telegram выключен{RESET}");
             Ok(())
         }
+        Some("calls") | Some("звонки") => calls_command(cfg, extra),
         Some("qr") => show_qr_maybe_png(cfg, extra),
         Some("newsecret") => {
             // Сменить секрет прокси — только по этой команде. Секрет постоянный:
@@ -875,7 +880,9 @@ fn telegram_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!("net tg on|off|qr|link|newsecret, а не «{other}»")),
+        Some(other) => Err(format!(
+            "net tg on|off|qr|link|calls|newsecret, а не «{other}»"
+        )),
     }
 }
 
@@ -2000,10 +2007,62 @@ fn print_deps(cfg: &Config) {
 }
 
 /// Домашняя папка в пути — это шум: сокращаем до `~`.
-fn short_path(path: &std::path::Path) -> String {
+pub fn short_path(path: &std::path::Path) -> String {
     let home = config::home();
     match path.strip_prefix(&home) {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.display().to_string(),
+    }
+}
+
+fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    match rest.first().copied() {
+        None | Some("status") => {
+            match calls::состояние(cfg) {
+                calls::Способ::Нода => {
+                    println!("{GREEN}Звонки идут через ноду{RESET}");
+                    println!("{DIM}Остальной интернет — напрямую. Снять: net calls off{RESET}");
+                }
+                calls::Способ::ПолныйТуннель => {
+                    println!("{GREEN}Звонки внутри полного туннеля{RESET}");
+                    println!("{DIM}Через ноду идёт весь интернет. Только Telegram: net calls on{RESET}");
+                }
+                calls::Способ::Dpi => {
+                    println!("{YELLOW}Звонки прикрыты дурением DPI{RESET}");
+                    println!("{DIM}Помогает не у всех провайдеров. Надёжнее: net calls on{RESET}");
+                }
+                calls::Способ::Никак => {
+                    println!("{RED}Звонки ничем не прикрыты{RESET}");
+                    println!("Прокси Telegram ведёт переписку, но не голос — это разные потоки.");
+                    println!("{DIM}Включить: net calls on{RESET}");
+                }
+            }
+            Ok(())
+        }
+        Some("on") => {
+            let dpi = rest.contains(&"--dpi");
+            for шаг in calls::on(cfg, dpi)? {
+                println!("  {GREEN}✓{RESET} {шаг}");
+            }
+            Ok(())
+        }
+        Some("off") => {
+            for шаг in calls::off(cfg)? {
+                println!("  {шаг}");
+            }
+            Ok(())
+        }
+        Some("update") => {
+            let сколько = singbox::update_telegram_cidr()?;
+            println!("{GREEN}Адреса Telegram обновлены: {сколько} сетей{RESET}");
+            if calls::состояние(cfg) == calls::Способ::Нода {
+                singbox::rewrite_scope(singbox::Scope::TelegramOnly)?;
+                singbox::Core::new(cfg).stop().ok();
+                singbox::Core::new(cfg).start()?;
+                println!("{DIM}Туннель перезапущен с новым списком{RESET}");
+            }
+            Ok(())
+        }
+        Some(other) => Err(unknown_sub("calls", other)),
     }
 }

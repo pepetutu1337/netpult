@@ -17,7 +17,199 @@ pub const SELECTOR: &str = "proxy";
 /// Тег автоподбора по задержке.
 pub const AUTO: &str = "auto";
 
+/// Что именно уходит в туннель.
+///
+/// Полный туннель — обычный VPN: наружу через ноду идёт всё, кроме российского.
+/// Точечный нужен для звонков: их душат по IP, дурить DPI нечего, но и гнать
+/// через ноду весь интернет ради разговора незачем — цена этому лишние
+/// задержки везде и мёртвые сервисы, которые не любят адреса датацентров.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Всё через ноду, российское — напрямую.
+    All,
+    /// Через ноду только Telegram, остальное напрямую.
+    TelegramOnly,
+}
+
+pub fn scope_path() -> PathBuf {
+    crate::config::state_dir().join("scope")
+}
+
+pub fn scope() -> Scope {
+    match std::fs::read_to_string(scope_path()) {
+        Ok(text) if text.trim() == "telegram" => Scope::TelegramOnly,
+        _ => Scope::All,
+    }
+}
+
+pub fn set_scope(scope: Scope) -> Result<(), String> {
+    crate::config::state_dir_ensure().map_err(|e| e.to_string())?;
+    let word = match scope {
+        Scope::All => "all",
+        Scope::TelegramOnly => "telegram",
+    };
+    std::fs::write(scope_path(), word).map_err(|e| format!("не записать охват: {e}"))
+}
+
+/// Наборы правил, которые ядро качает само. Берём с jsDelivr: он на Fastly, а
+/// не на закрытых по IP адресах GitHub.
+fn rule_sets(scope: Scope) -> String {
+    let mut sets = vec![
+        set_entry("geosite-ru", "sing-geosite@rule-set/geosite-category-ru"),
+        set_entry("geoip-ru", "sing-geoip@rule-set/geoip-ru"),
+    ];
+    if scope == Scope::TelegramOnly {
+        // Готового набора адресов Telegram у SagerNet нет — только домены.
+        // Адреса берём официальным списком, он лежит рядом (см. telegram_cidr).
+        sets.push(set_entry("geosite-telegram", "sing-geosite@rule-set/geosite-telegram"));
+    }
+    sets.join(",\n      ")
+}
+
+fn set_entry(tag: &str, path: &str) -> String {
+    format!(
+        r#"{{"type": "remote", "tag": "{tag}", "format": "binary", "url": "https://cdn.jsdelivr.net/gh/SagerNet/{path}.srs", "download_detour": "direct"}}"#
+    )
+}
+
+fn route_rules(scope: Scope) -> String {
+    let mut rules = vec![
+        r#"{"action": "sniff"}"#.to_string(),
+        r#"{"protocol": "dns", "action": "hijack-dns"}"#.to_string(),
+        r#"{"ip_is_private": true, "outbound": "direct"}"#.to_string(),
+    ];
+    match scope {
+        Scope::All => {
+            rules.push(r#"{"rule_set": "geosite-ru", "outbound": "direct"}"#.to_string());
+            rules.push(r#"{"rule_set": "geoip-ru", "outbound": "direct"}"#.to_string());
+        }
+        Scope::TelegramOnly => {
+            // Telegram ловим и по именам, и по адресам: голос идёт по IP,
+            // минуя DNS вовсе, и одного списка доменов тут мало.
+            rules.push(format!(
+                r#"{{"rule_set": "geosite-telegram", "outbound": "{SELECTOR}"}}"#
+            ));
+            rules.push(format!(
+                r#"{{"ip_cidr": [{}], "outbound": "{SELECTOR}"}}"#,
+                telegram_cidr()
+                    .iter()
+                    .map(|net| format!("\"{net}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    rules.join(",\n      ")
+}
+
+/// Адреса Telegram: официальный список core.telegram.org/resources/cidr.txt.
+///
+/// Он лежит в файле состояния и обновляется командой; пока файла нет, берётся
+/// вшитый снимок. Держать только вшитый нельзя — диапазоны меняются, и тогда
+/// часть разговоров пойдёт мимо ноды и умрёт.
+pub fn telegram_cidr() -> Vec<String> {
+    let свежий = std::fs::read_to_string(cidr_path()).unwrap_or_default();
+    let список: Vec<String> = свежий
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        // IPv6 у Telegram есть, но туннель поднимается на ipv4_only: адреса
+        // шестой версии в правило не пойдут и только раздуют конфиг.
+        .filter(|l| !l.contains(':'))
+        .map(str::to_string)
+        .collect();
+    if список.is_empty() {
+        ВШИТЫЕ_СЕТИ.iter().map(|s| s.to_string()).collect()
+    } else {
+        список
+    }
+}
+
+pub fn cidr_path() -> PathBuf {
+    crate::config::state_dir().join("telegram-cidr.txt")
+}
+
+/// Снимок официального списка на 09.2026.
+const ВШИТЫЕ_СЕТИ: [&str; 8] = [
+    "91.108.4.0/22",
+    "91.108.8.0/22",
+    "91.108.12.0/22",
+    "91.108.16.0/22",
+    "91.108.20.0/22",
+    "91.108.56.0/22",
+    "91.105.192.0/23",
+    "149.154.160.0/20",
+];
+
+/// Обновить список адресов Telegram с сайта самого Telegram.
+pub fn update_telegram_cidr() -> Result<usize, String> {
+    let out = Command::new("curl")
+        .args([
+            "-fsL",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "30",
+            "https://core.telegram.org/resources/cidr.txt",
+        ])
+        .output()
+        .map_err(|e| format!("не запустился curl: {e}"))?;
+    let текст = String::from_utf8_lossy(&out.stdout);
+    let сети: Vec<&str> = текст
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains('/') && !l.starts_with('#'))
+        .collect();
+    if сети.len() < 4 {
+        return Err("список адресов Telegram не пришёл — сайт закрыт или пуст".into());
+    }
+    crate::config::state_dir_ensure().map_err(|e| e.to_string())?;
+    std::fs::write(cidr_path(), сети.join("\n") + "\n")
+        .map_err(|e| format!("не записать список: {e}"))?;
+    Ok(сети.iter().filter(|l| !l.contains(':')).count())
+}
+
+fn route_final(scope: Scope) -> &'static str {
+    match scope {
+        Scope::All => SELECTOR,
+        Scope::TelegramOnly => "direct",
+    }
+}
+
+/// Куда уходят запросы имён. В точечном туннеле — своему провайдеру: гнать
+/// весь DNS за границу ради Telegram незачем, а российские сайты от этого
+/// ломаются.
+fn dns_block(scope: Scope) -> String {
+    let (rules, last) = match scope {
+        Scope::All => (
+            r#"{"rule_set": "geosite-ru", "server": "dns-direct"}"#.to_string(),
+            "dns-remote",
+        ),
+        Scope::TelegramOnly => (
+            r#"{"rule_set": "geosite-telegram", "server": "dns-remote"}"#.to_string(),
+            "dns-direct",
+        ),
+    };
+    format!(
+        r#"{{
+    "servers": [
+      {{"type": "https", "tag": "dns-remote", "server": "1.1.1.1", "detour": "{SELECTOR}"}},
+      {{"type": "https", "tag": "dns-direct", "server": "77.88.8.8"}}
+    ],
+    "rules": [
+      {rules}
+    ],
+    "final": "{last}",
+    "strategy": "ipv4_only"
+  }}"#
+    )
+}
+
 pub fn build_config(nodes: &[Node]) -> Result<String, String> {
+    build_config_scoped(nodes, scope())
+}
+
+pub fn build_config_scoped(nodes: &[Node], scope: Scope) -> Result<String, String> {
     if nodes.is_empty() {
         return Err("нет ни одной ноды".into());
     }
@@ -53,17 +245,7 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
     Ok(format!(
         r#"{{
   "log": {{"level": "warn"}},
-  "dns": {{
-    "servers": [
-      {{"type": "https", "tag": "dns-remote", "server": "1.1.1.1", "detour": "{selector}"}},
-      {{"type": "udp", "tag": "dns-direct", "server": "77.88.8.8"}}
-    ],
-    "rules": [
-      {{"rule_set": "geosite-ru", "server": "dns-direct"}}
-    ],
-    "final": "dns-remote",
-    "strategy": "ipv4_only"
-  }},
+  "dns": {dns},
   "inbounds": [
     {{
       "type": "tun",
@@ -77,31 +259,14 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
   "outbounds": [{outbounds}],
   "route": {{
     "rules": [
-      {{"action": "sniff"}},
-      {{"protocol": "dns", "action": "hijack-dns"}},
-      {{"ip_is_private": true, "outbound": "direct"}},
-      {{"rule_set": "geosite-ru", "outbound": "direct"}},
-      {{"rule_set": "geoip-ru", "outbound": "direct"}}
+      {rules}
     ],
     "rule_set": [
-      {{
-        "type": "remote",
-        "tag": "geosite-ru",
-        "format": "binary",
-        "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs",
-        "download_detour": "direct"
-      }},
-      {{
-        "type": "remote",
-        "tag": "geoip-ru",
-        "format": "binary",
-        "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs",
-        "download_detour": "direct"
-      }}
+      {sets}
     ],
     "auto_detect_interface": true,
     "default_domain_resolver": {{"server": "dns-direct"}},
-    "final": "{selector}"
+    "final": "{final}"
   }},
   "experimental": {{
     "clash_api": {{"external_controller": "{api}"}},
@@ -109,7 +274,10 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
   }}
 }}
 "#,
-        selector = SELECTOR,
+        dns = dns_block(scope),
+        rules = route_rules(scope),
+        sets = rule_sets(scope),
+        final = route_final(scope),
         outbounds = all.join(",\n    "),
         api = CLASH_API,
         // Без явного пути ядро кладёт кэш в тот каталог, откуда его запустили,
@@ -119,6 +287,27 @@ pub fn build_config(nodes: &[Node]) -> Result<String, String> {
         )
         .trim_matches('"')
     ))
+}
+
+/// Переписывает охват в уже собранном конфиге: ноды остаются те же, меняются
+/// только маршруты и DNS. Нужно, чтобы переключение не требовало заново
+/// разбирать подписку.
+pub fn rewrite_scope(scope: Scope) -> Result<(), String> {
+    let path = crate::config::state_dir().join("singbox.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| "конфиг ядра ещё не собран: net vpn sub <ссылка>".to_string())?;
+    let mut config = crate::json::Json::parse(&text)?;
+    let route = crate::json::Json::parse(&format!(
+        r#"{{"rules": [{}], "rule_set": [{}], "auto_detect_interface": true, "default_domain_resolver": {{"server": "dns-direct"}}, "final": "{}"}}"#,
+        route_rules(scope),
+        rule_sets(scope),
+        route_final(scope)
+    ))?;
+    let dns = crate::json::Json::parse(&dns_block(scope))?;
+    config.set("route", route);
+    config.set("dns", dns);
+    std::fs::write(&path, config.to_text()).map_err(|e| format!("не записать конфиг: {e}"))?;
+    set_scope(scope)
 }
 
 use crate::config::Config;
