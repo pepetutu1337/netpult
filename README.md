@@ -62,6 +62,16 @@ netpult tg on|off      прокси Telegram
 netpult tg qr          QR для телефона
 netpult tg link        ссылки для компьютера и телефона
 
+netpult calls          чем прикрыты звонки Telegram
+netpult calls on       починить: через ноду идёт только Telegram
+netpult calls on --dpi починить дурением DPI, без ноды
+netpult calls off      вернуть как было
+
+netpult deps           что нужно пульту и что нашлось
+netpult deps install   поставить недостающее
+netpult doctor         осмотр: что сломано и чем чинится
+netpult doctor --fix   осмотр и починка безопасного
+
 netpult tune           подобрать рабочую стратегию перебором
 netpult tune --all     перебрать все, не останавливаясь на первой хорошей
 
@@ -179,6 +189,42 @@ netpult dns test
 > Маковская и виндовая половины собраны и проверены сборкой под свои цели, но
 > на живых машинах не гонялись — ни мака, ни Windows под рукой не было. Linux
 > проверен вживую, включая цикл включения и выключения.
+
+## Звонки в Telegram
+
+Прокси MTProto (`netpult tg on`) ведёт переписку, но не голос: разговор идёт
+отдельными UDP-пакетами к голосовым серверам и мимо прокси. Поэтому знакомая
+картина — сообщения ходят, звонок не встаёт.
+
+```sh
+netpult calls         # чем прикрыты звонки сейчас
+netpult calls on      # починить
+netpult calls off     # вернуть как было
+```
+
+`calls on` поднимает **точечный туннель**: через ноду уходит только Telegram,
+весь остальной интернет идёт напрямую — без лишних задержек и без адресов
+датацентра там, где их не любят. Адреса Telegram берутся официальным списком
+`core.telegram.org/resources/cidr.txt` и обновляются сами: голос ходит по
+адресам, минуя имена, и одних доменных списков мало.
+
+`calls on --dpi` — путь без ноды: к текущей стратегии дописывается блок для
+голосовых портов (UDP 590-1400, 3478, фильтр `stun`). Помогает, только если
+провайдер режет звонки разбором пакетов. Если диапазоны Telegram закрыты по IP
+— а автор zapret говорит именно об этом, — дурить нечего, и путь не поможет;
+плюс при разговоре напрямую между собеседниками обход нужен обоим.
+
+## Что сломано
+
+```sh
+netpult doctor        # осмотр: что измерили, что сломано, чем чинится
+netpult doctor --fix  # и сразу починить безопасное
+```
+
+У каждой строки осмотра есть причина, а не только вердикт: не «Telegram не
+работает», а «149.154.167.51:443 не отвечает — соединение не встаёт». Порядок
+проверок — по порядку поломки: сначала связь по адресу, потом разрешение имён,
+потом зависимости, взаимные помехи, стратегия, Telegram, нода, DNS, сторож.
 
 ## Сторож
 
@@ -438,28 +484,42 @@ install -Dm755 target/release/netpult ~/.local/bin/netpult
 
 </details>
 
-### 2. zapret
-
-Поставь [Sergeydigl3/zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux)
-по его инструкции (Linux; на Windows — winws из проекта Flowseal, на macOS —
-tpws из bol-van/zapret). netpult сам найдёт его в обычных местах
-(`~/Apps/...`, `~/Downloads/...`) по наличию `conf.env`. Служба на Linux
-ожидается как `zapret_discord_youtube.service`.
-
-Проверка: `netpult status` должен показать строку `zapret`.
-
-### 3. tglock-cli (Telegram)
-
-Скачай CLI-сборку под свою систему из релизов
-[by-sonic/tglock](https://github.com/by-sonic/tglock) и положи, например, в
-`~/Apps/tglock/tglock-cli` (на Windows — `tglock-cli.exe`). netpult найдёт его
-там же или в `~/.local/share/netpult/`.
+### 2. Всё, чем обходят
 
 ```sh
-netpult tg on      # поднимет прокси и покажет QR
+netpult deps            # что нужно пульту и что уже нашлось
+netpult deps install    # поставить недостающее
 ```
 
-### 4. Happ (по желанию — для геоблока и сплита)
+Пульт держит три внешние программы и сам знает, где их брать:
+
+| что | зачем | откуда ставится |
+| --- | --- | --- |
+| zapret | обход DPI: YouTube, Discord, звонки | [Sergeydigl3/zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux) |
+| tglock-cli | прокси Telegram без чужих серверов | [by-sonic/tglock](https://github.com/by-sonic/tglock) |
+| sing-box | туннель, сплит, шифрованный DNS | своя сборка ([tools/build-core.sh](tools/build-core.sh)) |
+
+Уже стоит своё — ставить заново не надо: поиск смотрит в папках программ,
+в `~/Dev`, `~/Projects`, `~/Downloads`, в `PATH` и внутри склонированных
+репозиториев (`target/release`). Если zapret распакован в нескольких местах
+сразу, берётся тот, из которого запускается служба, а копии с `backup` в имени
+отбрасываются. Свою установку можно назвать прямо:
+
+```sh
+netpult deps use zapret ~/Apps/zapret-discord-youtube-linux-master
+```
+
+**Если ничего не качается.** Файлы релизов GitHub лежат на
+`objects.githubusercontent.com`, а этот диапазон закрыт в России по IP:
+соединение не встаёт вовсе, и дурить DPI тут нечего. Пульт пробует по очереди
+свой склад через jsDelivr, обычную ссылку и медленные зеркала. Когда закрыто
+всё, принеси файл с любой машины с интернетом:
+
+```sh
+netpult deps install tglock ~/Downloads/tglock-cli-x86_64-unknown-linux-gnu
+```
+
+### 3. Happ (по желанию — для геоблока и сплита)
 
 Поставь [Happ](https://github.com/Happ-proxy/happ-desktop), заведи подписку,
 выбери ноду. Для сплита переведи Happ в режим прокси (не TUN), тогда он держит
@@ -470,7 +530,7 @@ netpult vpn        # открыть окно клиента
 netpult split on   # домены из списка через ноду, остальное напрямую
 ```
 
-### 5. Автозапуск (Linux)
+### 4. Автозапуск (Linux)
 
 ```sh
 netpult watch install   # сторож: раз в 10 мин чинит упавшее, следит за сменой сети
