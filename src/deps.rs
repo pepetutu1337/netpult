@@ -519,7 +519,7 @@ fn install_tglock(local: Option<&Path>) -> Result<PathBuf, String> {
         "https://github.com/by-sonic/tglock/releases/download/{TGLOCK_TAG}/{}",
         tglock_asset()
     )));
-    download(&urls, &target, 500_000).map_err(|trouble| {
+    let source = download(&urls, &target, 500_000).map_err(|trouble| {
         format!(
             "tglock не скачался ({trouble}).\n\
              Принеси файл с любой машины с интернетом и поставь из него:\n\
@@ -528,6 +528,14 @@ fn install_tglock(local: Option<&Path>) -> Result<PathBuf, String> {
             tglock_asset()
         )
     })?;
+    // Скачаться мог и мусор: обрезанный файл, страница ошибки, сборка под
+    // чужую архитектуру. Пусть скажет свою версию — тогда он точно рабочий.
+    if ask_version(&target, &["--version"]).is_none() {
+        let _ = std::fs::remove_file(&target);
+        return Err(format!(
+            "скачанный tglock не запускается (источник {source}). Попробуй ещё раз или принеси файл: net deps install tglock <файл>"
+        ));
+    }
     Ok(target)
 }
 
