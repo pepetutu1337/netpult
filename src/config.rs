@@ -95,29 +95,14 @@ fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|p| p.exists()).cloned()
 }
 
-/// Ищет уже установленный zapret, чтобы не заставлять человека настраивать заново.
+/// Ищет уже установленный zapret и tglock. Сам поиск живёт в `deps`: он
+/// смотрит и в папках программ, и в склонированных репозиториях, и в PATH.
 fn detect_zapret_dir() -> Option<PathBuf> {
-    let h = home();
-    let names = [
-        "Apps/zapret-discord-youtube-linux-master",
-        "zapret-discord-youtube-linux-master",
-        "Downloads/zapret-discord-youtube-linux-master",
-        "Apps/zapret",
-        ".local/share/zapret",
-    ];
-    let candidates: Vec<PathBuf> = names.iter().map(|n| h.join(n)).collect();
-    first_existing(&candidates).filter(|p| p.join("conf.env").exists())
+    crate::deps::find_zapret().map(|f| f.path)
 }
 
 fn detect_tglock() -> Option<PathBuf> {
-    let h = home();
-    let exe = if cfg!(windows) { "tglock-cli.exe" } else { "tglock-cli" };
-    let candidates = vec![
-        state_dir().join(exe),
-        h.join("Apps/tglock").join(exe),
-        h.join(".local/share/tgqr").join(exe),
-    ];
-    first_existing(&candidates)
+    crate::deps::find_tglock().map(|f| f.path)
 }
 
 fn detect_happ() -> Option<PathBuf> {

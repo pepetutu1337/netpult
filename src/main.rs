@@ -1,6 +1,7 @@
 //! netpult — один пульт для обхода блокировок: zapret, VPN и прокси Telegram.
 
 mod config;
+mod deps;
 mod dns;
 mod json;
 mod network;
@@ -97,6 +98,7 @@ pub fn dispatch_with(
         "share" => share_command(cfg, &rest),
         "split" => split_command(cfg, &rest),
         "dns" => dns_command(cfg, &rest),
+        "deps" | "install" => deps_command(cfg, &rest),
         "watch" => watch_command(cfg, &rest),
         "qr" => show_qr_maybe_png(cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
@@ -243,6 +245,9 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
     let own_core = sub::config_path().exists() && cfg.core_bin.is_some();
     match rest.first().copied() {
         None | Some("on") | Some("open") => {
+            if sub::config_path().exists() {
+                ensure_dep(cfg, deps::Kind::Core)?;
+            }
             if own_core {
                 core.start()?;
                 print_core_status();
@@ -772,6 +777,7 @@ fn zapret_action(
     what: &str,
     action: impl Fn(&Zapret) -> Result<(), String>,
 ) -> Result<(), String> {
+    ensure_dep(cfg, deps::Kind::Zapret)?;
     println!("{what}...");
     std::io::Write::flush(&mut std::io::stdout()).ok();
     action(&Zapret::new(cfg))?;
@@ -837,6 +843,7 @@ fn telegram_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some("on") | Some("start") => {
+            ensure_dep(cfg, deps::Kind::Tglock)?;
             tg.start()?;
             println!("{GREEN}Прокси Telegram включён{RESET}");
             show_qr(cfg)
@@ -873,6 +880,7 @@ fn telegram_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
 }
 
 fn tune_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    ensure_dep(cfg, deps::Kind::Zapret)?;
     let full = rest.contains(&"--all");
     println!("Подбираю стратегию. Интернет будет прыгать.");
     if !full {
@@ -1105,6 +1113,11 @@ fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
         }
         Some("on") => {
             let за_роутером = dns::шлюз_кита();
+            // За роутером кита свой резолвер не нужен: DNS отдаётся роутеру,
+            // и ядро для этого не требуется.
+            if за_роутером.is_none() {
+                ensure_dep(cfg, deps::Kind::Core)?;
+            }
             if за_роутером.is_some() {
                 println!("Отдаю DNS роутеру...");
             } else {
@@ -1840,4 +1853,157 @@ fn print_help() {
   net version          версия
   net help             эта справка"
     );
+}
+
+// ── зависимости ─────────────────────────────────────────────────────────────
+
+/// Спрашивает «да/нет» в терминале. Не терминал — считаем, что ответа нет:
+/// в скрипте и в сторожe вопросы задавать некому.
+fn ask_yes(question: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    print!("{question} [Y/n] ");
+    std::io::stdout().flush().ok();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let answer = answer.trim().to_lowercase();
+    answer.is_empty() || answer == "y" || answer == "д" || answer == "да" || answer == "yes"
+}
+
+/// Проверяет зависимость перед командой, которая без неё не работает.
+///
+/// Смысл в том, чтобы не отвечать «не найдено» и не бросать человека: если
+/// можно поставить — предлагаем прямо здесь, если нельзя — говорим, какой
+/// командой это чинится.
+fn ensure_dep(cfg: &Config, kind: deps::Kind) -> Result<(), String> {
+    if deps::find(kind, cfg).is_some() {
+        return Ok(());
+    }
+    println!(
+        "{YELLOW}Нет {}{RESET} — {}",
+        kind.title(),
+        kind.about()
+    );
+    if !ask_yes("Поставить сейчас?") {
+        return Err(format!(
+            "без {} эта команда не работает. Поставить позже: net deps install {}",
+            kind.title(),
+            kind.key()
+        ));
+    }
+    let path = deps::install(kind, None)?;
+    deps::remember(kind, &path)?;
+    println!("{GREEN}Готово:{RESET} {}", path.display());
+    println!("{DIM}Пульт запомнил путь. Повтори команду.{RESET}");
+    Err(format!("{} поставлен, повтори команду", kind.title()))
+}
+
+fn deps_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
+    match rest.first().copied() {
+        None | Some("status") | Some("list") => {
+            print_deps(cfg);
+            Ok(())
+        }
+        Some("install") | Some("add") => {
+            let what = rest.get(1).copied();
+            let file = rest.get(2).map(std::path::PathBuf::from);
+            let kinds: Vec<deps::Kind> = match what {
+                None | Some("all") | Some("всё") => deps::Kind::ALL
+                    .into_iter()
+                    .filter(|k| deps::find(*k, cfg).is_none())
+                    .collect(),
+                Some(word) => vec![deps::Kind::parse(word)
+                    .ok_or_else(|| format!("не знаю такой зависимости: {word}. Есть zapret, tglock, core"))?],
+            };
+            if kinds.is_empty() {
+                println!("{GREEN}Всё на месте.{RESET} Что где лежит: net deps");
+                return Ok(());
+            }
+            let mut trouble = Vec::new();
+            for kind in kinds {
+                println!("Ставлю {}...", kind.title());
+                match deps::install(kind, file.as_deref()) {
+                    Ok(path) => {
+                        deps::remember(kind, &path)?;
+                        println!("{GREEN}  готово:{RESET} {}", path.display());
+                    }
+                    Err(message) => {
+                        println!("{RED}  не вышло:{RESET} {message}");
+                        trouble.push(kind.title());
+                    }
+                }
+            }
+            if trouble.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("не поставилось: {}", trouble.join(", ")))
+            }
+        }
+        Some("use") | Some("path") => {
+            let word = rest.get(1).copied().ok_or("net deps use <zapret|tglock|core> <путь>")?;
+            let kind = deps::Kind::parse(word)
+                .ok_or_else(|| format!("не знаю такой зависимости: {word}"))?;
+            let path = rest.get(2).ok_or("не сказано, какой путь запомнить")?;
+            let path = std::path::PathBuf::from(path);
+            if !path.exists() {
+                return Err(format!("нет такого пути: {}", path.display()));
+            }
+            deps::remember(kind, &path)?;
+            println!("{GREEN}Запомнил:{RESET} {} → {}", kind.title(), path.display());
+            Ok(())
+        }
+        Some(other) => Err(unknown_sub("deps", other)),
+    }
+}
+
+fn print_deps(cfg: &Config) {
+    println!("{BOLD}ЗАВИСИМОСТИ{RESET}");
+    let mut missing = Vec::new();
+    for kind in deps::Kind::ALL {
+        match deps::find(kind, cfg) {
+            Some(found) => {
+                let version = deps::version_of(kind, &found.path)
+                    .map(|v| format!(" · {v}"))
+                    .unwrap_or_default();
+                println!(
+                    "  {GREEN}✓{RESET} {:<14} {}{}",
+                    kind.title(),
+                    short_path(&found.path),
+                    version
+                );
+                println!("     {DIM}{}{RESET}", found.source);
+            }
+            None => {
+                missing.push(kind);
+                println!("  {RED}✗{RESET} {:<14} {DIM}нет — {}{RESET}", kind.title(), kind.about());
+                println!("     {DIM}без него не работает: {}{RESET}", kind.needed_for());
+            }
+        }
+    }
+    if missing.is_empty() {
+        println!("\n{GREEN}Всё на месте.{RESET}");
+    } else {
+        println!(
+            "\nПоставить: {}",
+            missing
+                .iter()
+                .map(|k| format!("net deps install {}", k.key()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("{DIM}Уже стоит своё? Скажи путь: net deps use <что> <путь>{RESET}");
+    }
+}
+
+/// Домашняя папка в пути — это шум: сокращаем до `~`.
+fn short_path(path: &std::path::Path) -> String {
+    let home = config::home();
+    match path.strip_prefix(&home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
