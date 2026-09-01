@@ -84,6 +84,12 @@ struct Screen {
 }
 
 pub fn run(cfg: &Config) -> Result<(), String> {
+    // Пустой пульт открывать экраном незачем: там будут одни нули. Человеку
+    // на чистой машине нужен не пульт, а первые три шага.
+    if crate::первый_запуск(cfg) {
+        crate::print_first_run();
+        return Ok(());
+    }
     let mut screen = Screen {
         status: status_lines(cfg),
         carrier: crate::route::carrier(cfg),

@@ -149,6 +149,7 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("on", "включить zapret"),
         ("off", "выключить zapret"),
         ("restart", "перезапустить zapret"),
+        ("toggle", "переключить zapret"),
         ("strat", "список стратегий обхода"),
         ("tune", "подобрать рабочую стратегию перебором"),
         ("dns on", "шифрованный DNS для всей системы"),
@@ -170,6 +171,15 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("vpn info", "подписка: трафик, срок, страница устройств"),
         ("vpn hwid", "идентификатор этого устройства для панели"),
         ("vpn log", "журнал ядра"),
+        ("calls", "чем прикрыты звонки Telegram"),
+        ("calls on", "починить звонки: через ноду только Telegram"),
+        ("calls on --dpi", "починить звонки дурением DPI, без ноды"),
+        ("calls off", "вернуть звонки как было"),
+        ("calls update", "обновить адреса Telegram"),
+        ("deps", "что нужно пульту и что нашлось"),
+        ("deps install", "поставить недостающее"),
+        ("doctor", "осмотр: что сломано и чем чинится"),
+        ("doctor --fix", "осмотр и починка безопасного"),
         ("tg on", "включить прокси Telegram"),
         ("tg off", "выключить прокси Telegram"),
         ("tg qr", "QR прокси для телефона"),
@@ -188,6 +198,7 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("watch --once", "один проход проверки"),
         ("watch install", "сторож в автозапуск"),
         ("watch log", "что чинилось"),
+        ("version", "версия пульта"),
         ("help", "справка"),
     ]
 }
@@ -1687,7 +1698,33 @@ fn print_status_lines(cfg: &Config) {
     }
 }
 
+/// Пульт ещё не настроен: ни одной зависимости и ни одной подписки.
+///
+/// Пустой пульт выглядит как сломанный — везде нули и «выключено». Вместо
+/// этого показываем три шага: что поставить, чем прикрыть, куда идти дальше.
+pub fn первый_запуск(cfg: &Config) -> bool {
+    deps::Kind::ALL
+        .into_iter()
+        .all(|kind| deps::find(kind, cfg).is_none())
+        && !sub::config_path().exists()
+}
+
+pub fn print_first_run() {
+    println!("{BOLD}netpult{RESET} — пульт обхода блокировок. Пока пусто, начнём.\n");
+    println!("  1. {BOLD}net deps install{RESET}   поставить то, чем обходят:");
+    println!("     {DIM}zapret (YouTube, Discord), tglock (Telegram), ядро sing-box (туннель){RESET}");
+    println!("  2. {BOLD}net on{RESET}             включить обход DPI");
+    println!("     {DIM}не помогло — net tune подберёт стратегию перебором{RESET}");
+    println!("  3. {BOLD}net vpn sub <ссылка>{RESET}  подписка, если она есть:");
+    println!("     {DIM}с ней работают туннель, звонки в Telegram и сплит{RESET}");
+    println!("\n{DIM}Что сломано и чем чинится — net doctor. Все команды — net help.{RESET}");
+}
+
 fn print_status(cfg: &Config) {
+    if первый_запуск(cfg) {
+        print_first_run();
+        return;
+    }
     // Первым — ответ на вопрос, ради которого команду и набирают.
     let (ok, carrier) = route::carrier(cfg);
     let color = if ok { GREEN } else { YELLOW };
@@ -1777,7 +1814,13 @@ pub fn run_test_public(cfg: &Config) {
 }
 
 fn print_help() {
-    println!(
+    println!("{}", help_text());
+}
+
+/// Текст справки отдельно от печати: так его можно проверить тестом на то,
+/// что ни одна команда не потерялась.
+fn help_text() -> String {
+    format!(
         "{BOLD}netpult{RESET} — обход блокировок: zapret, VPN, прокси Telegram, раздача, сплит.
 
 {BOLD}экран{RESET}
@@ -1821,6 +1864,26 @@ fn print_help() {
   net tg link          ссылки для компьютера и телефона
   net tg newsecret     сменить секрет прокси
 
+{BOLD}звонки{RESET} — прокси ведёт переписку, но не голос
+  net calls            чем прикрыты звонки сейчас
+  net calls on         починить: через ноду идёт только Telegram
+  net calls on --dpi   починить дурением DPI, без ноды (помогает не всем)
+  net calls off        вернуть как было
+  net calls update     обновить адреса Telegram
+
+{BOLD}DNS{RESET} — шифрование запросов имён для всей системы
+  net dns on           поднять свой резолвер и перевести систему на него
+  net dns off          вернуть DNS своей сети
+  net dns status       шифруется ли сейчас
+  net dns test         куда уходят запросы имён
+
+{BOLD}хозяйство{RESET}
+  net deps             что нужно пульту: что нашлось, чего нет
+  net deps install     поставить недостающее (zapret, tglock, ядро)
+  net deps use <что> <путь>  запомнить свою установку
+  net doctor           осмотр: что сломано и чем чинится
+  net doctor --fix     осмотр и починка безопасного
+
 {BOLD}сплит{RESET} — через ноду только нужные домены, остальное напрямую
   net split on         включить
   net split off        выключить
@@ -1859,7 +1922,7 @@ fn print_help() {
   net test             проверить YouTube, Discord, Telegram и скорость
   net version          версия
   net help             эта справка"
-    );
+    )
 }
 
 // ── зависимости ─────────────────────────────────────────────────────────────
@@ -2064,5 +2127,52 @@ fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some(other) => Err(unknown_sub("calls", other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Команда, которой нет в справке, для человека не существует: `net dns`
+    /// однажды уже так и потерялся — жил в подсказках строки, а в справке нет.
+    #[test]
+    fn каждая_команда_есть_в_справке() {
+        let help = help_text();
+        let потеряны: Vec<&str> = commands()
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| {
+                let первое_слово = name.split_whitespace().next().unwrap_or(name);
+                !help.contains(&format!("net {name}")) && !help.contains(&format!("net {первое_слово} "))
+            })
+            .collect();
+        assert!(потеряны.is_empty(), "нет в справке: {потеряны:?}");
+    }
+
+    /// Обратная сторона: справка не должна звать в команду, которой нет.
+    #[test]
+    fn справка_не_врёт_про_команды() {
+        let known: Vec<&str> = commands()
+            .iter()
+            .map(|(name, _)| name.split_whitespace().next().unwrap_or(name))
+            .collect();
+        let mut чужие = Vec::new();
+        for line in help_text().lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("net ") else { continue };
+            let слово = rest.split_whitespace().next().unwrap_or("");
+            // Пояснения к строке «net» без команды написаны по-русски; сами
+            // команды — латиницей, по ним и судим.
+            if слово.is_empty() || !слово.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                continue;
+            }
+            if !known.contains(&слово) {
+                чужие.push(слово.to_string());
+            }
+        }
+        чужие.sort();
+        чужие.dedup();
+        assert!(чужие.is_empty(), "справка зовёт в несуществующее: {чужие:?}");
     }
 }

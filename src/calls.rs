@@ -89,13 +89,7 @@ pub fn on(cfg: &Config, dpi: bool) -> Result<Vec<String>, String> {
 fn через_ноду(cfg: &Config) -> Result<Vec<String>, String> {
     let mut шаги = Vec::new();
     let core = singbox::Core::new(cfg);
-
-    // zapret и туннель разом бессмысленны: в туннеле дурить DPI нечего.
-    let z = Zapret::new(cfg);
-    if z.state() == zapret::State::On {
-        z.stop().ok();
-        шаги.push("zapret выключен: в туннеле он только мешает проверкам".into());
-    }
+    let прежний = singbox::scope();
 
     // Диапазоны Telegram меняются, а голос идёт по адресам, минуя имена:
     // устаревший список — это часть разговоров мимо ноды.
@@ -105,13 +99,26 @@ fn через_ноду(cfg: &Config) -> Result<Vec<String>, String> {
     }
 
     singbox::rewrite_scope(Scope::TelegramOnly)?;
-    шаги.push("через ноду идёт только Telegram, остальное — напрямую".into());
 
+    // Порядок важен: сперва поднимаем туннель и только потом снимаем zapret.
+    // Обратный порядок оставлял машину вообще без обхода, если ядро не
+    // взлетело, — и виноватым выглядел бы zapret, который никто не просил
+    // выключать.
     if core.state() == singbox::State::Up {
         core.stop()?;
     }
-    core.start()?;
+    if let Err(беда) = core.start() {
+        singbox::rewrite_scope(прежний).ok();
+        return Err(format!("{беда}\nОхват туннеля вернул как был"));
+    }
+    шаги.push("через ноду идёт только Telegram, остальное — напрямую".into());
     шаги.push("туннель поднят".into());
+
+    let z = Zapret::new(cfg);
+    if z.state() == zapret::State::On {
+        z.stop().ok();
+        шаги.push("zapret выключен: в туннеле он только мешает проверкам".into());
+    }
     Ok(шаги)
 }
 

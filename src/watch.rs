@@ -176,7 +176,16 @@ fn follow_network(cfg: &Config) -> bool {
 /// это и есть проверка ноды: то, что не прошло у сторожа, не пройдёт и у
 /// человека.
 fn tunnel_tick() -> bool {
-    if everything_reachable() {
+    // В точечном туннеле обычные сайты идут напрямую и о ноде не говорят
+    // ничего: она может быть мертва, а проверка — зелёной. Меряем то, что
+    // через ноду и идёт, — сами серверы Telegram.
+    let точечный = crate::singbox::scope() == crate::singbox::Scope::TelegramOnly;
+    let живо = if точечный {
+        telegram_reachable()
+    } else {
+        everything_reachable()
+    };
+    if живо {
         return false;
     }
     let было = crate::singbox::active_node()
@@ -191,7 +200,7 @@ fn tunnel_tick() -> bool {
         return true;
     }
     std::thread::sleep(Duration::from_secs(3));
-    if everything_reachable() {
+    if (точечный && telegram_reachable()) || (!точечный && everything_reachable()) {
         let стало = crate::singbox::active_node()
             .map(|(n, _)| n)
             .unwrap_or_else(|| "?".into());
@@ -200,6 +209,17 @@ fn tunnel_tick() -> bool {
         alert("ни одна нода не пропускает трафик — проверь подписку: net vpn nodes");
     }
     true
+}
+
+/// Отвечают ли серверы Telegram. Проверяем соединением, а не страницей:
+/// диапазоны Telegram закрывают по IP, и тогда сессия не встаёт вовсе.
+fn telegram_reachable() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    ["149.154.167.51:443", "149.154.175.50:443"]
+        .iter()
+        .filter_map(|addr| addr.to_socket_addrs().ok())
+        .flatten()
+        .any(|target| TcpStream::connect_timeout(&target, Duration::from_secs(5)).is_ok())
 }
 
 /// Как часто позволено перебирать стратегии.
@@ -222,6 +242,7 @@ fn tune_allowed() -> bool {
 
 pub fn tick(cfg: &Config) -> bool {
     maybe_update_geoblock();
+    maybe_update_telegram_cidr(cfg);
     let mut acted = follow_network(cfg);
     let z = Zapret::new(cfg);
     let tg = Telegram::new(cfg);
@@ -308,6 +329,43 @@ pub fn tick(cfg: &Config) -> bool {
         Err(e) => alert(&format!("обход упал, подбор не удался: {e}")),
     }
     true
+}
+
+/// Раз в неделю обновляет адреса Telegram, пока звонки идут через ноду.
+///
+/// Список живой: Telegram добавляет и убирает сети. Устаревший список означает
+/// разговоры мимо ноды, то есть молчащий звонок при внешне рабочем туннеле.
+fn maybe_update_telegram_cidr(cfg: &Config) {
+    if crate::singbox::scope() != crate::singbox::Scope::TelegramOnly {
+        return;
+    }
+    let marker = crate::singbox::cidr_path();
+    let week = 7 * 24 * 60 * 60;
+    let fresh = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e.as_secs() < week).unwrap_or(false))
+        .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    let было = crate::singbox::telegram_cidr();
+    match crate::singbox::update_telegram_cidr() {
+        Ok(_) if crate::singbox::telegram_cidr() == было => {}
+        Ok(сколько) => {
+            note(&format!("адреса Telegram изменились: {сколько} сетей, пересобираю маршруты"));
+            if crate::singbox::rewrite_scope(crate::singbox::Scope::TelegramOnly).is_ok() {
+                let core = crate::singbox::Core::new(cfg);
+                if core.state() == crate::singbox::State::Up {
+                    core.stop().ok();
+                    match core.start() {
+                        Ok(()) => note("туннель поднят с новым списком адресов"),
+                        Err(e) => alert(&format!("туннель не поднялся после обновления адресов: {e}")),
+                    }
+                }
+            }
+        }
+        Err(e) => note(&format!("адреса Telegram не обновились: {e}")),
+    }
 }
 
 /// Раз в сутки обновляет автосписок геоблока (если сплит вообще используется).
