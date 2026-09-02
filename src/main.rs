@@ -174,6 +174,7 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
         ("calls", "чем прикрыты звонки Telegram"),
         ("calls on", "починить звонки: через ноду только Telegram"),
         ("calls on --dpi", "починить звонки дурением DPI, без ноды"),
+        ("calls on --here", "туннель отсюда, даже за своим роутером"),
         ("calls off", "вернуть звонки как было"),
         ("calls update", "обновить адреса Telegram"),
         ("deps", "что нужно пульту и что нашлось"),
@@ -1868,6 +1869,7 @@ fn help_text() -> String {
   net calls            чем прикрыты звонки сейчас
   net calls on         починить: через ноду идёт только Telegram
   net calls on --dpi   починить дурением DPI, без ноды (помогает не всем)
+  net calls on --here  поднять туннель отсюда, даже если стоишь за своим роутером
   net calls off        вернуть как было
   net calls update     обновить адреса Telegram
 
@@ -2094,6 +2096,11 @@ fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                     println!("{YELLOW}Звонки прикрыты дурением DPI{RESET}");
                     println!("{DIM}Помогает не у всех провайдеров. Надёжнее: net calls on{RESET}");
                 }
+                calls::Способ::Роутер(gw) => {
+                    println!("{YELLOW}Эта машина за своим роутером {gw}{RESET}");
+                    println!("Голос всех домашних устройств решается на нём, а не здесь.");
+                    println!("{DIM}Туннель именно отсюда, поверх роутера: net calls on --here{RESET}");
+                }
                 calls::Способ::Никак => {
                     println!("{RED}Звонки ничем не прикрыты{RESET}");
                     println!("Прокси Telegram ведёт переписку, но не голос — это разные потоки.");
@@ -2104,7 +2111,8 @@ fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
         }
         Some("on") => {
             let dpi = rest.contains(&"--dpi");
-            for шаг in calls::on(cfg, dpi)? {
+            let here = rest.contains(&"--here");
+            for шаг in calls::on(cfg, dpi, here)? {
                 println!("  {GREEN}✓{RESET} {шаг}");
             }
             Ok(())

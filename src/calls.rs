@@ -28,6 +28,10 @@ use crate::zapret::{self, Zapret};
 /// Чем сейчас прикрыты звонки.
 #[derive(Debug, PartialEq)]
 pub enum Способ {
+    /// Машина стоит за своим роутером с обходом. Голос всех домашних устройств
+    /// решается там: поднимать поверх ещё один туннель — только мешать.
+    /// Проверить и включить надо на роутере, отсюда этого не видно.
+    Роутер(String),
     /// Точечный туннель: через ноду уходит только Telegram.
     Нода,
     /// Стратегия zapret с блоком для голосовых портов.
@@ -48,6 +52,11 @@ pub fn состояние(cfg: &Config) -> Способ {
     if стратегия_со_звонками(cfg) {
         return Способ::Dpi;
     }
+    // Дома за своим роутером голос заворачивает он сам, и поднимать поверх
+    // ещё один туннель незачем — станет только хуже.
+    if let Some(gw) = crate::dns::шлюз_кита() {
+        return Способ::Роутер(gw);
+    }
     Способ::Никак
 }
 
@@ -62,9 +71,16 @@ fn стратегия_со_звонками(cfg: &Config) -> bool {
 }
 
 /// Включить звонки. `dpi` — не трогать ноду, чинить дурением DPI.
-pub fn on(cfg: &Config, dpi: bool) -> Result<Vec<String>, String> {
+pub fn on(cfg: &Config, dpi: bool, here: bool) -> Result<Vec<String>, String> {
     if dpi {
         return через_zapret(cfg);
+    }
+    if let (false, Способ::Роутер(gw)) = (here, состояние(cfg)) {
+        return Ok(vec![
+            format!("эта машина за своим роутером {gw} — голос решается на нём"),
+            "включить там: netctl calls on (кит) или rctl calls".into(),
+            "нужен туннель именно отсюда — net calls on --here".into(),
+        ]);
     }
     if sub::config_path().exists() && cfg.core_bin.is_some() {
         через_ноду(cfg)
