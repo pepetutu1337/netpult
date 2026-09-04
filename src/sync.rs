@@ -42,6 +42,19 @@ fn tag_of(outbound: &Json) -> Option<String> {
     outbound.get("tag").and_then(|t| t.as_str())
 }
 
+/// Один ли и тот же набор нод (порядок неважен, все поля важны).
+fn same_nodes(a: &[Node], b: &[Node]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a: Vec<&Node> = a.iter().collect();
+    let mut b: Vec<&Node> = b.iter().collect();
+    let key = |n: &&Node| (n.server.clone(), n.port);
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    a == b
+}
+
 /// Собрать новый конфиг: чужая обвязка + готовый список нод.
 ///
 /// `nodes` — уже сведённый активный список (см. [`sub::reconcile`]): что
@@ -213,6 +226,24 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
             "ни одной живой ноды: ни в подписках, ни в запасе — конфиг оставлен прежним".into(),
         );
     }
+    // Набор нод не изменился — конфиг не трогаем и ядро не перезапускаем
+    // (иначе суточный крон роняет связь каждый день на ровном месте).
+    // Сравниваем сами ноды со всеми полями: сменил провайдер ключи на том же
+    // адресе — это изменение, перетряхнуть надо. Обвязку не сравниваем: её
+    // sync и так не меняет. Состояние подписок и запаса закрепляем всегда.
+    if same_nodes(&prev_active, &rec.active) {
+        persist(&rec, &store, &fetched);
+        return Ok(Report {
+            nodes: rec.active.len(),
+            carried: rec.carried.len(),
+            revived: rec.revived.len(),
+            parked: rec.parked.len(),
+            backup: plan.config.clone(),
+            rolled_back: false,
+            note: "ноды не менялись".into(),
+        });
+    }
+
     let (merged, count) = merge(&existing, &rec.active)?;
     let carried = rec.carried.len();
     let revived = rec.revived.len();
@@ -567,5 +598,16 @@ mod tests {
     #[test]
     fn пустой_список_ничего_не_ломает() {
         assert!(merge(РОУТЕР, &[]).is_err());
+    }
+
+    #[test]
+    fn same_nodes_не_зависит_от_порядка_но_ловит_смену_ключа() {
+        let a = нода("N1", "a.example");
+        let b = нода("N2", "b.example");
+        assert!(same_nodes(&[a.clone(), b.clone()], &[b.clone(), a.clone()]));
+
+        let mut b2 = b.clone();
+        b2.secret = "99999999-9999-9999-9999-999999999999".into();
+        assert!(!same_nodes(&[a.clone(), b], &[a, b2]));
     }
 }
