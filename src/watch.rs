@@ -275,7 +275,9 @@ pub fn tick(cfg: &Config) -> bool {
     if z.state() == State::Missing {
         return acted;
     }
-    if cfg.watch_zapret && z.state() == State::Off {
+    if cfg.watch_zapret && z.state() == State::Off && z.is_manual_off() {
+        // Выключили руками — не чиним, ждём следующей ручной команды.
+    } else if cfg.watch_zapret && z.state() == State::Off {
         match z.start() {
             Ok(()) => {
                 note("zapret был выключен — включил");

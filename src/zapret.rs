@@ -115,15 +115,26 @@ impl<'a> Zapret<'a> {
     }
 
     pub fn start(&self) -> Result<(), String> {
-        self.service("start")
+        self.service("start")?;
+        clear_manual_off();
+        Ok(())
     }
 
     pub fn stop(&self) -> Result<(), String> {
-        self.service("stop")
+        self.service("stop")?;
+        mark_manual_off();
+        Ok(())
     }
 
     pub fn restart(&self) -> Result<(), String> {
         self.service("restart")
+    }
+
+    /// Выключали ли zapret явной командой (`net zapret off`/`toggle`), а не
+    /// он сам упал. Сторож лечит только то, что сломалось само — ручное
+    /// выключение не чинит, пока не попросят обратно (`start`/`toggle`).
+    pub fn is_manual_off(&self) -> bool {
+        manual_off_marker().exists()
     }
 
     fn service(&self, action: &str) -> Result<(), String> {
@@ -203,6 +214,19 @@ fn engine_process_name() -> &'static str {
     } else {
         "nfqws"
     }
+}
+
+fn manual_off_marker() -> PathBuf {
+    crate::config::state_dir().join("zapret.manual-off")
+}
+
+fn mark_manual_off() {
+    let _ = std::fs::create_dir_all(crate::config::state_dir());
+    let _ = std::fs::write(manual_off_marker(), "");
+}
+
+fn clear_manual_off() {
+    let _ = std::fs::remove_file(manual_off_marker());
 }
 
 pub fn process_running(name: &str) -> bool {
