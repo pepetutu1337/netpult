@@ -44,10 +44,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     }
     msg.extend_from_slice(&bitlen.to_be_bytes());
 
-    for chunk in msg.chunks_exact(BLOCK) {
+    // Индексами, а не chunks_exact: длина msg кратна BLOCK по построению,
+    // а clippy на свежем rustc жалуется на chunks_exact с константой.
+    for base in (0..msg.len()).step_by(BLOCK) {
+        let chunk = &msg[base..base + BLOCK];
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for i in 0..16 {
+            let b = &chunk[i * 4..i * 4 + 4];
+            w[i] = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
