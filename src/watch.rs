@@ -247,6 +247,7 @@ fn tune_allowed() -> bool {
 pub fn tick(cfg: &Config) -> bool {
     maybe_update_geoblock();
     maybe_update_telegram_cidr(cfg);
+    maybe_refresh_subscriptions();
     let mut acted = follow_network(cfg);
     let z = Zapret::new(cfg);
     let tg = Telegram::new(cfg);
@@ -387,6 +388,41 @@ fn maybe_update_telegram_cidr(cfg: &Config) {
 }
 
 /// Раз в сутки обновляет автосписок геоблока (если сплит вообще используется).
+/// Раз в сутки перечитывает подписки: провайдер добавляет и убирает ноды из
+/// выгрузки, а выпавшие живые надо успеть перенести в запас, пока они ещё
+/// отвечают. На роутере это делает отдельный крон (`netpult vpn sync`); тут —
+/// клиентская сторона, свой конфиг.
+fn maybe_refresh_subscriptions() {
+    if crate::subs::Store::load().active().next().is_none() {
+        return;
+    }
+    let marker = state_dir().join("subs.refreshed");
+    let day = 24 * 60 * 60;
+    let fresh = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e.as_secs() < day).unwrap_or(false))
+        .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    match crate::subs::refresh(Duration::from_secs(3)) {
+        Ok(r) => {
+            let c = &r.rec;
+            note(&format!(
+                "подписки перечитаны: актив {}, +{} новых, ~{} перенесено, ↺{} из запаса, ⚰{} в запас, ✂{} вычищено",
+                c.active.len(),
+                c.added.len(),
+                c.carried.len(),
+                c.revived.len(),
+                c.parked.len(),
+                c.pruned.len()
+            ));
+            std::fs::write(&marker, "").ok();
+        }
+        Err(e) => note(&format!("подписки не перечитались: {e}")),
+    }
+}
+
 fn maybe_update_geoblock() {
     let marker = state_dir().join("geoblock.updated");
     let day = 24 * 60 * 60;
