@@ -3,7 +3,7 @@
 //! Профиль привязывается к имени сети Wi-Fi, а если его не видно — к шлюзу.
 //! Пульт узнаёт сеть и включает то, что в ней было включено в прошлый раз.
 
-use crate::config::{home, state_dir, Config};
+use crate::config::{Config, home, state_dir};
 use crate::telegram::Telegram;
 use crate::zapret::{State, Zapret};
 use std::collections::BTreeMap;
@@ -65,7 +65,13 @@ fn gateway() -> Option<String> {
             .and_then(|l| l.split_once(':'))
             .map(|(_, v)| v.trim().to_string())
     } else {
-        let text = output("powershell", &["-Command", "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop"])?;
+        let text = output(
+            "powershell",
+            &[
+                "-Command",
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop",
+            ],
+        )?;
         Some(text)
     }
 }
@@ -96,7 +102,10 @@ pub fn load() -> BTreeMap<String, Profile> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("сеть ").or_else(|| line.strip_prefix("network ")) {
+        if let Some(rest) = line
+            .strip_prefix("сеть ")
+            .or_else(|| line.strip_prefix("network "))
+        {
             if let Some(previous) = name.take() {
                 out.insert(previous, std::mem::take(&mut profile));
             }
@@ -126,8 +135,14 @@ fn save_all(profiles: &BTreeMap<String, Profile>) -> Result<(), String> {
     let mut text = String::from("# Профили netpult: что включать в какой сети.\n\n");
     for (name, p) in profiles {
         text.push_str(&format!("сеть {name}\n"));
-        text.push_str(&format!("zapret = {}\n", if p.zapret { "on" } else { "off" }));
-        text.push_str(&format!("telegram = {}\n", if p.telegram { "on" } else { "off" }));
+        text.push_str(&format!(
+            "zapret = {}\n",
+            if p.zapret { "on" } else { "off" }
+        ));
+        text.push_str(&format!(
+            "telegram = {}\n",
+            if p.telegram { "on" } else { "off" }
+        ));
         if let Some(s) = &p.strategy {
             text.push_str(&format!("strategy = {s}\n"));
         }
@@ -175,10 +190,11 @@ pub fn apply(cfg: &Config) -> Result<Vec<String>, String> {
     let z = Zapret::new(cfg);
 
     if let Some(strategy) = &profile.strategy
-        && z.strategy().as_deref() != Some(strategy.as_str()) {
-            z.set_strategy(strategy)?;
-            done.push(format!("стратегия {strategy}"));
-        }
+        && z.strategy().as_deref() != Some(strategy.as_str())
+    {
+        z.set_strategy(strategy)?;
+        done.push(format!("стратегия {strategy}"));
+    }
 
     match (profile.zapret, z.state()) {
         (true, State::Off) => {

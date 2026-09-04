@@ -5,7 +5,7 @@
 //!   Windows — winws через WinDivert (тот же проект, другой драйвер);
 //!   macOS   — tpws через PF: только TCP, UDP этот бэкенд не умеет.
 
-use crate::config::{read_env_value, Config};
+use crate::config::{Config, read_env_value};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -44,7 +44,11 @@ impl<'a> Zapret<'a> {
             }
         } else {
             // На Windows и macOS процесс запускается напрямую, не через службу.
-            if process_running(engine_process_name()) { State::On } else { State::Off }
+            if process_running(engine_process_name()) {
+                State::On
+            } else {
+                State::Off
+            }
         }
     }
 

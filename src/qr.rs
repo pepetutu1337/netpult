@@ -348,7 +348,9 @@ fn count_overlapping(haystack: &str, needle: &str) -> usize {
     if n.len() > h.len() {
         return 0;
     }
-    (0..=h.len() - n.len()).filter(|&i| &h[i..i + n.len()] == n).count()
+    (0..=h.len() - n.len())
+        .filter(|&i| &h[i..i + n.len()] == n)
+        .count()
 }
 
 fn penalty(grid: &[Vec<u8>], size: usize) -> usize {
@@ -377,7 +379,10 @@ fn penalty(grid: &[Vec<u8>], size: usize) -> usize {
         }
 
         // Правило 3: узор, похожий на поисковый.
-        let pattern: String = line.iter().map(|&b| if b == 1 { '1' } else { '0' }).collect();
+        let pattern: String = line
+            .iter()
+            .map(|&b| if b == 1 { '1' } else { '0' })
+            .collect();
         score += 40 * count_overlapping(&pattern, "10111010000");
         score += 40 * count_overlapping(&pattern, "00001011101");
     }
@@ -493,7 +498,11 @@ pub fn render(grid: &[Vec<bool>], quiet: usize) -> String {
     while i < rows.len() {
         let top = &rows[i];
         let empty = vec![false; width];
-        let bottom = if i + 1 < rows.len() { &rows[i + 1] } else { &empty };
+        let bottom = if i + 1 < rows.len() {
+            &rows[i + 1]
+        } else {
+            &empty
+        };
         for (t, b) in top.iter().zip(bottom.iter()) {
             // Тёмный модуль должен печататься тёмной клеткой: терминал обычно
             // светлый на тёмном, а сканеру нужно наоборот.

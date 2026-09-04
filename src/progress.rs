@@ -168,7 +168,10 @@ fn clip(text: &str, room: usize) -> String {
     if text.chars().count() <= room {
         return text.to_string();
     }
-    text.chars().take(room.saturating_sub(1)).collect::<String>() + "…"
+    text.chars()
+        .take(room.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn длительность(secs: u64) -> String {

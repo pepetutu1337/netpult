@@ -62,7 +62,11 @@ pub fn connect(
             stream.read_exact(&mut len)?;
             len[0] as usize
         }
-        other => return Err(std::io::Error::other(format!("неизвестный тип адреса {other}"))),
+        other => {
+            return Err(std::io::Error::other(format!(
+                "неизвестный тип адреса {other}"
+            )));
+        }
     };
     let mut rest = vec![0u8; addr_len + 2];
     stream.read_exact(&mut rest)?;

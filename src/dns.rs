@@ -17,7 +17,7 @@
 //! открытый UDP на 53 теперь перехватывает ТСПУ, и ответ приходит не от того,
 //! кого спросили.
 
-use crate::config::{state_dir, Config};
+use crate::config::{Config, state_dir};
 use std::net::{Ipv4Addr, UdpSocket};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -158,7 +158,9 @@ pub fn ask(server: &str, port: u16, name: &str, timeout: Duration) -> Option<О�
     let (len, _) = socket.recv_from(&mut buf).ok()?;
     let заняло = начало.elapsed();
     let адреса = parse_answer(&buf[..len], id)?;
-    Some(Ответ { адреса, заняло })
+    Some(Ответ {
+        адреса, заняло
+    })
 }
 
 /// Разбор ответа: пропускаем вопрос, идём по записям, берём A.
@@ -185,7 +187,12 @@ fn parse_answer(data: &[u8], id: u16) -> Option<Vec<Ipv4Addr>> {
             return None;
         }
         if rtype == 1 && rdlen == 4 {
-            out.push(Ipv4Addr::new(data[i], data[i + 1], data[i + 2], data[i + 3]));
+            out.push(Ipv4Addr::new(
+                data[i],
+                data[i + 1],
+                data[i + 2],
+                data[i + 3],
+            ));
         }
         i += rdlen;
     }
@@ -627,7 +634,8 @@ pub fn on(cfg: &Config) -> Result<Vec<String>, String> {
     let mut шаги = Vec::new();
     let config = config_path();
     std::fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(&config, build_config(port())).map_err(|e| format!("не записать конфиг: {e}"))?;
+    std::fs::write(&config, build_config(port()))
+        .map_err(|e| format!("не записать конфиг: {e}"))?;
 
     // Проверяем конфиг тем же ядром, что будет его исполнять: битый конфиг не
     // должен уронить DNS всей машины.

@@ -96,14 +96,18 @@ pub fn choose_prefilled(title: &str, items: &[Item], query: &str) -> Result<Opti
             (KeyCode::Esc, _) => break Ok(None),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => break Ok(None),
             (KeyCode::Enter, _) => {
-                break Ok(if matches.is_empty() { None } else { Some(cursor) });
+                break Ok(if matches.is_empty() {
+                    None
+                } else {
+                    Some(cursor)
+                });
             }
-            (KeyCode::Down, _) | (KeyCode::Tab, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                cursor = step(cursor, true)
-            }
-            (KeyCode::Up, _) | (KeyCode::BackTab, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                cursor = step(cursor, false)
-            }
+            (KeyCode::Down, _)
+            | (KeyCode::Tab, _)
+            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => cursor = step(cursor, true),
+            (KeyCode::Up, _)
+            | (KeyCode::BackTab, _)
+            | (KeyCode::Char('p'), KeyModifiers::CONTROL) => cursor = step(cursor, false),
             (KeyCode::Backspace, _) => {
                 query.pop();
             }
@@ -150,7 +154,11 @@ pub fn filter(items: &[Item], query: &str) -> Vec<usize> {
 /// по порядку в разных местах.
 fn score(label: &str, query: &str) -> Option<i32> {
     let haystack: Vec<char> = label.to_lowercase().chars().collect();
-    let needle: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let needle: Vec<char> = query
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     if needle.is_empty() {
         return Some(0);
     }
@@ -234,7 +242,9 @@ fn draw(title: &str, items: &[Item], matches: &[usize], cursor: usize, query: &s
 
     let shown: Vec<usize> = {
         let at = matches.iter().position(|m| *m == cursor).unwrap_or(0);
-        let start = at.saturating_sub(room / 2).min(matches.len().saturating_sub(room));
+        let start = at
+            .saturating_sub(room / 2)
+            .min(matches.len().saturating_sub(room));
         matches.iter().skip(start).take(room).copied().collect()
     };
     // Колонка имени — по самому длинному из показанных, как в списке команд на
@@ -278,7 +288,9 @@ fn draw(title: &str, items: &[Item], matches: &[usize], cursor: usize, query: &s
             .map(|h| format!("  {DIM}{h}{RESET}"))
             .unwrap_or_default();
         if selected {
-            line(format!("  {GREEN}▸{RESET} {dot} {GREEN}{label}{RESET}{hint}"));
+            line(format!(
+                "  {GREEN}▸{RESET} {dot} {GREEN}{label}{RESET}{hint}"
+            ));
         } else {
             line(format!("    {dot} {label}{hint}"));
         }
@@ -295,7 +307,6 @@ fn draw(title: &str, items: &[Item], matches: &[usize], cursor: usize, query: &s
     print!("{out}");
     std::io::stdout().flush().ok();
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -9,10 +9,10 @@
 //! досылают строки по мере готовности — экран при этом живой, а не замерший.
 
 use crate::config::Config;
-use crate::singbox;
 use crate::picker::{clip, fit, pad};
+use crate::singbox;
 use crate::sub;
-use crate::{status_lines, Status, BOLD, DIM, GREEN, RED, RESET, YELLOW};
+use crate::{BOLD, DIM, GREEN, RED, RESET, Status, YELLOW, status_lines};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::terminal;
 use std::io::{BufRead, Write};
@@ -147,19 +147,21 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                     screen.running = None;
                     // Пароль спрашиваем не заранее, а по надобности: там, где
                     // хватает polkit, лишний запрос только раздражает.
-                    if !ok && text.contains(crate::sudoer::NEED_PASSWORD)
-                        && let Some(again) = screen.last.clone() {
-                            match ask_password(&again) {
-                                Ok(()) => {
-                                    start_command(&mut screen, sender.clone(), &again);
-                                    continue;
-                                }
-                                Err(e) => {
-                                    screen.message = Some((false, e));
-                                    continue;
-                                }
+                    if !ok
+                        && text.contains(crate::sudoer::NEED_PASSWORD)
+                        && let Some(again) = screen.last.clone()
+                    {
+                        match ask_password(&again) {
+                            Ok(()) => {
+                                start_command(&mut screen, sender.clone(), &again);
+                                continue;
+                            }
+                            Err(e) => {
+                                screen.message = Some((false, e));
+                                continue;
                             }
                         }
+                    }
                     screen.message = Some((ok, text));
                     screen.status = status_lines(cfg);
                     screen.carrier = crate::route::carrier(cfg);
@@ -287,8 +289,10 @@ pub fn run(cfg: &Config) -> Result<(), String> {
                     // Выбор ноды живёт на этом же экране — незачем звать
                     // отдельный список поверх него.
                     "vpn use" | "vpn nodes" => {
-                        screen.message =
-                            Some((true, "ноды выше: стрелки — выбор, Enter — включить, p — замерить".into()))
+                        screen.message = Some((
+                            true,
+                            "ноды выше: стрелки — выбор, Enter — включить, p — замерить".into(),
+                        ))
                     }
                     _ => start_command(&mut screen, sender.clone(), &line),
                 }
@@ -512,8 +516,19 @@ fn stop_running(screen: &mut Screen) {
 /// калечит. Пароль сюда больше не относится: его спрашивают отдельно.
 fn needs_terminal(line: &str) -> bool {
     const BIG: [&str; 13] = [
-        "tg qr", "tg link", "help", "test", "tune", "status", "path", "strat", "split list",
-        "split log", "share status", "vpn log", "watch log",
+        "tg qr",
+        "tg link",
+        "help",
+        "test",
+        "tune",
+        "status",
+        "path",
+        "strat",
+        "split list",
+        "split log",
+        "share status",
+        "vpn log",
+        "watch log",
     ];
     BIG.iter()
         .any(|name| line == *name || line.starts_with(&format!("{name} ")))
@@ -719,10 +734,7 @@ fn node_summary(screen: &Screen) -> String {
         Some(ms) => format!(" · лучшая {ms} мс"),
         None => String::new(),
     };
-    format!(
-        "  {DIM}живых {alive}/{}{tail}{RESET}",
-        screen.nodes.len()
-    )
+    format!("  {DIM}живых {alive}/{}{tail}{RESET}", screen.nodes.len())
 }
 
 /// Полоска качества связи: чем короче задержка, тем длиннее. Восемь знаков —
@@ -757,16 +769,24 @@ fn delay_bar(ms: u32) -> String {
 fn draw(screen: &Screen, suggestions: &[Suggestion]) {
     // Кадр печатается поверх прежнего, строка затирает строку: без очистки
     // экрана нет мигания.
-    let width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(48);
+    let width = terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+        .max(48);
 
     let mut rows: Vec<String> = Vec::new();
-    rows.push(format!("{BOLD}  ОБХОД БЛОКИРОВОК{RESET}{}", node_summary(screen)));
+    rows.push(format!(
+        "{BOLD}  ОБХОД БЛОКИРОВОК{RESET}{}",
+        node_summary(screen)
+    ));
     rows.push(rule(width));
     // Ответ на главный вопрос экрана — первой строкой и не тусклым. Раньше его
     // приходилось складывать в голове из трёх равноправных строк состояния.
     let (carrier_ok, carrier) = &screen.carrier;
     let carrier_color = if *carrier_ok { GREEN } else { YELLOW };
-    rows.push(format!("  {DIM}Трафик{RESET}  {carrier_color}{carrier}{RESET}"));
+    rows.push(format!(
+        "  {DIM}Трафик{RESET}  {carrier_color}{carrier}{RESET}"
+    ));
     rows.push(String::new());
 
     // Колонки состояния выравниваются здесь, а не пробелами внутри строк:
@@ -777,7 +797,9 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
         let name = pad(s.name, name_width);
         let state = pad(&s.state, 4);
         if s.detail.is_empty() {
-            rows.push(format!("  {color}{dot}{RESET} {name}  {color}{state}{RESET}"));
+            rows.push(format!(
+                "  {color}{dot}{RESET} {name}  {color}{state}{RESET}"
+            ));
         } else {
             rows.push(format!(
                 "  {color}{dot}{RESET} {name}  {color}{state}{RESET}  {}",
@@ -880,7 +902,11 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
                     };
                     // Полоска слева от числа: глазу хватает её одной, число
                     // нужно, только когда ноды близки.
-                    format!("{} {color}{}{RESET}", delay_bar(ms), pad(&format!("{ms} мс"), 7))
+                    format!(
+                        "{} {color}{}{RESET}",
+                        delay_bar(ms),
+                        pad(&format!("{ms} мс"), 7)
+                    )
                 }
             };
             // Имена занимают всю ширину, какая есть: на широком окне «Нидерланды
@@ -893,7 +919,9 @@ fn draw(screen: &Screen, suggestions: &[Suggestion]) {
                 fit(&node.name, name_width)
             };
             if selected {
-                rows.push(format!("  {GREEN}▸{RESET} {mark} {GREEN}{name}{RESET} {delay}"));
+                rows.push(format!(
+                    "  {GREEN}▸{RESET} {mark} {GREEN}{name}{RESET} {delay}"
+                ));
             } else {
                 // Двадцать строк в полную яркость перебивали шапку состояния,
                 // хотя список — второй шаг, а не первый.

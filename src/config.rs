@@ -122,7 +122,11 @@ fn detect_happ() -> Option<PathBuf> {
 
 /// Ядро sing-box: сначала своё, положенное рядом с состоянием, потом системное.
 fn detect_core() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "sing-box.exe" } else { "sing-box" };
+    let name = if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
     let mut candidates = vec![state_dir().join(name), home().join(".local/bin").join(name)];
     if let Some(path) = std::env::var_os("PATH") {
         candidates.extend(std::env::split_paths(&path).map(|p| p.join(name)));

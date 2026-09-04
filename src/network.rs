@@ -41,7 +41,10 @@ pub fn load() -> BTreeMap<String, Seen> {
         return out;
     };
     let mut name: Option<String> = None;
-    let mut seen = Seen { upstream: false, checked: 0 };
+    let mut seen = Seen {
+        upstream: false,
+        checked: 0,
+    };
     for line in text.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -51,7 +54,10 @@ pub fn load() -> BTreeMap<String, Seen> {
                 out.insert(previous, seen);
             }
             name = Some(rest.trim().to_string());
-            seen = Seen { upstream: false, checked: 0 };
+            seen = Seen {
+                upstream: false,
+                checked: 0,
+            };
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -75,7 +81,10 @@ fn save_all(all: &BTreeMap<String, Seen>) -> Result<(), String> {
         String::from("# Что пульт видел в этих сетях: чинит ли блокировки что-то выше него.\n\n");
     for (name, seen) in all {
         text.push_str(&format!("сеть {name}\n"));
-        text.push_str(&format!("upstream = {}\n", if seen.upstream { "on" } else { "off" }));
+        text.push_str(&format!(
+            "upstream = {}\n",
+            if seen.upstream { "on" } else { "off" }
+        ));
         text.push_str(&format!("checked = {}\n\n", seen.checked));
     }
     std::fs::write(path(), text).map_err(|e| e.to_string())
@@ -88,7 +97,10 @@ pub fn remember(network: Option<&str>, upstream: bool) {
     let mut all = load();
     all.insert(
         network.to_string(),
-        Seen { upstream, checked: crate::sub::now_secs() },
+        Seen {
+            upstream,
+            checked: crate::sub::now_secs(),
+        },
     );
     let _ = save_all(&all);
 }
@@ -107,7 +119,10 @@ mod tests {
         // Разбор проверяем на той же логике, что и чтение файла.
         let mut out = BTreeMap::new();
         let mut name: Option<String> = None;
-        let mut seen = Seen { upstream: false, checked: 0 };
+        let mut seen = Seen {
+            upstream: false,
+            checked: 0,
+        };
         for line in text.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -117,7 +132,10 @@ mod tests {
                     out.insert(p, seen);
                 }
                 name = Some(rest.trim().to_string());
-                seen = Seen { upstream: false, checked: 0 };
+                seen = Seen {
+                    upstream: false,
+                    checked: 0,
+                };
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {

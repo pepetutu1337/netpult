@@ -251,16 +251,11 @@ pub struct Refresh {
 /// списком и запасом, переписать конфиг движка. Ничего не перезапускает —
 /// это на вызывающем.
 ///
-/// `probe` — таймаут проверки отклика для нод, выпавших из подписки.
-pub fn refresh(probe: Duration) -> Result<Refresh, String> {
+/// Забрать все активные подписки: вернуть объединённый список свежих нод,
+/// отчёт по каждой ссылке и store с уже посчитанными счётчиками провалов
+/// (несохранённый — записать на диск должен вызывающий).
+pub fn fetch_all() -> (Vec<Node>, Vec<Fetched>, Store) {
     let mut store = Store::load();
-    if store.active().next().is_none() {
-        return Err("нет активных подписок — net vpn subs add <ссылка>".into());
-    }
-
-    let prev_active = sub::current_nodes();
-    let bank = sub::load_bank();
-
     let urls: Vec<String> = store.active().map(|s| s.url.clone()).collect();
     let mut fresh: Vec<Node> = Vec::new();
     let mut fetched: Vec<Fetched> = Vec::new();
@@ -289,8 +284,19 @@ pub fn refresh(probe: Duration) -> Result<Refresh, String> {
             }),
         }
     }
-
     sub::dedupe_names(&mut fresh);
+    (fresh, fetched, store)
+}
+
+/// `probe` — таймаут проверки отклика для нод, выпавших из подписки.
+pub fn refresh(probe: Duration) -> Result<Refresh, String> {
+    let (fresh, fetched, store) = fetch_all();
+    if fetched.is_empty() {
+        return Err("нет активных подписок — net vpn subs add <ссылка>".into());
+    }
+
+    let prev_active = sub::current_nodes();
+    let bank = sub::load_bank();
     let rec = sub::reconcile(&fresh, &prev_active, bank, probe);
 
     let mut active = rec.active.clone();
@@ -307,7 +313,13 @@ pub fn refresh(probe: Duration) -> Result<Refresh, String> {
     }
 
     let config = crate::singbox::build_config(&active)?;
-    let first = urls.first().cloned().unwrap_or_default();
+    // sub::save пишет и «первую ссылку» в отдельный файл для sub::saved_url;
+    // берём первую активную из store.
+    let first = store
+        .active()
+        .next()
+        .map(|s| s.url.clone())
+        .unwrap_or_default();
     let path = sub::save(&first, &active, &config)?;
 
     // Отметки отклика: всё, что в работе, отвечало только что.
@@ -331,7 +343,11 @@ pub fn refresh(probe: Duration) -> Result<Refresh, String> {
     })
 }
 
-fn write_log(rec: &sub::Reconciled, fetched: &[Fetched], pool_empty: bool) -> std::io::Result<()> {
+pub fn write_log(
+    rec: &sub::Reconciled,
+    fetched: &[Fetched],
+    pool_empty: bool,
+) -> std::io::Result<()> {
     crate::config::state_dir_ensure()?;
     let mut f = std::fs::OpenOptions::new()
         .create(true)

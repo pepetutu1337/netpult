@@ -9,21 +9,21 @@ mod json;
 mod network;
 mod picker;
 mod probe;
-mod progress;
 mod profile;
-mod split;
-mod sudoer;
+mod progress;
 mod qr;
 mod route;
 mod share;
 mod singbox;
 mod socks;
+mod split;
 mod sub;
 mod subs;
+mod sudoer;
 mod sync;
 mod telegram;
-mod tune;
 mod tui;
+mod tune;
 mod vpn;
 mod watch;
 mod zapret;
@@ -103,7 +103,9 @@ pub fn dispatch_with(
         "dns" => dns_command(cfg, &rest),
         "deps" | "install" => deps_command(cfg, &rest),
         "calls" | "звонки" => calls_command(cfg, &rest),
-        "doctor" | "fix" | "осмотр" => doctor::run(cfg, rest.contains(&"--fix") || command == "fix"),
+        "doctor" | "fix" | "осмотр" => {
+            doctor::run(cfg, rest.contains(&"--fix") || command == "fix")
+        }
         "watch" => watch_command(cfg, &rest),
         "qr" => show_qr_maybe_png(cfg, &rest),
         "--raw" => raw_qr(rest.first().copied()),
@@ -297,7 +299,9 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                     },
                     "--proxy" => match args.next() {
                         Some(addr) => plan.probe_proxy = addr.to_string(),
-                        None => return Err("--proxy ждёт адрес вида socks5h://127.0.0.1:1180".into()),
+                        None => {
+                            return Err("--proxy ждёт адрес вида socks5h://127.0.0.1:1180".into());
+                        }
                     },
                     "--restart" => {
                         let tail: Vec<String> = args.by_ref().map(str::to_string).collect();
@@ -325,17 +329,35 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             let report = report?;
             if report.rolled_back {
                 println!("{YELLOW}{}{RESET}", report.note);
-                println!("{DIM}прежний конфиг лежит в {}{RESET}", report.backup.display());
+                println!(
+                    "{DIM}прежний конфиг лежит в {}{RESET}",
+                    report.backup.display()
+                );
                 return Err("обновление откачено".into());
             }
-            let kept = if report.kept > 0 {
-                format!(" (из них перенесено прежних: {})", report.kept)
-            } else {
+            let mut хвост = Vec::new();
+            if report.carried > 0 {
+                хвост.push(format!("перенесено живыми: {}", report.carried));
+            }
+            if report.revived > 0 {
+                хвост.push(format!("из запаса: {}", report.revived));
+            }
+            if report.parked > 0 {
+                хвост.push(format!("в запас: {}", report.parked));
+            }
+            let хвост = if хвост.is_empty() {
                 String::new()
+            } else {
+                format!(" ({})", хвост.join(", "))
             };
-            println!("{GREEN}{}: {}{kept}{RESET}", report.note, report.nodes);
-            let what = if plan.dry_run { "собранный конфиг" } else { "прежний конфиг" };
+            println!("{GREEN}{}: {}{хвост}{RESET}", report.note, report.nodes);
+            let what = if plan.dry_run {
+                "собранный конфиг"
+            } else {
+                "прежний конфиг"
+            };
             println!("{DIM}{what}: {}{RESET}", report.backup.display());
+            println!("{DIM}журнал: net vpn log sub{RESET}");
             Ok(())
         }
         Some("sub") | Some("subscription") => {
@@ -413,7 +435,10 @@ fn vpn_nodes(cfg: &Config) -> Result<(), String> {
         for (i, name) in names.iter().enumerate() {
             println!("{:>3}. {name}", i + 1);
         }
-        println!("\nвсего нод: {}. Задержки появятся, когда туннель поднят.", names.len());
+        println!(
+            "\nвсего нод: {}. Задержки появятся, когда туннель поднят.",
+            names.len()
+        );
         return Ok(());
     }
     let current = singbox::current_node();
@@ -472,8 +497,8 @@ fn vpn_pick(cfg: &Config) -> Result<(), String> {
     let items: Vec<picker::Item> = names
         .iter()
         .map(|name| {
-            let mut item = picker::Item::new(name.clone())
-                .current(current.as_deref() == Some(name.as_str()));
+            let mut item =
+                picker::Item::new(name.clone()).current(current.as_deref() == Some(name.as_str()));
             if up {
                 ход.step(name);
                 item = item.hint(match singbox::delay(name, 3000) {
@@ -704,8 +729,14 @@ fn vpn_refresh(cfg: &Config) -> Result<(), String> {
 
     for f in &r.fetched {
         match &f.result {
-            Ok(n) => println!("  {GREEN}✓{RESET} {}  {DIM}{n} нод{RESET}", subs::short(&f.url)),
-            Err(e) => println!("  {YELLOW}✗{RESET} {}  {DIM}{e}{RESET}", subs::short(&f.url)),
+            Ok(n) => println!(
+                "  {GREEN}✓{RESET} {}  {DIM}{n} нод{RESET}",
+                subs::short(&f.url)
+            ),
+            Err(e) => println!(
+                "  {YELLOW}✗{RESET} {}  {DIM}{e}{RESET}",
+                subs::short(&f.url)
+            ),
         }
         if f.retired {
             println!(
@@ -725,7 +756,10 @@ fn vpn_refresh(cfg: &Config) -> Result<(), String> {
         rec.pruned.len(),
     );
     if !rec.revived.is_empty() {
-        println!("{DIM}вернулись из запаса: {}{RESET}", rec.revived.join(", "));
+        println!(
+            "{DIM}вернулись из запаса: {}{RESET}",
+            rec.revived.join(", ")
+        );
     }
     if !rec.parked.is_empty() {
         println!("{DIM}ушли в запас: {}{RESET}", rec.parked.join(", "));
@@ -781,9 +815,7 @@ fn vpn_subs(cfg: &Config, args: &[&str]) -> Result<(), String> {
                 Err("нет такой отставленной ссылки — смотри net vpn subs list".into())
             }
         }
-        Some(other) => Err(format!(
-            "net vpn subs [list|add|rm|revive], а не «{other}»"
-        )),
+        Some(other) => Err(format!("net vpn subs [list|add|rm|revive], а не «{other}»")),
     }
 }
 
@@ -840,7 +872,9 @@ fn подхватить_ноды(cfg: &Config) {
     println!("{DIM}заработали. Связь моргнёт на пару секунд.{RESET}");
     if let Err(e) = core.stop() {
         println!("{YELLOW}Не вышло снять туннель: {e}{RESET}");
-        println!("{DIM}Новые ноды уже на диске — примени вручную: net vpn off && net vpn on{RESET}");
+        println!(
+            "{DIM}Новые ноды уже на диске — примени вручную: net vpn off && net vpn on{RESET}"
+        );
         return;
     }
     match core.start() {
@@ -970,13 +1004,25 @@ fn tune_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
     let full = rest.contains(&"--all");
     println!("Подбираю стратегию. Интернет будет прыгать.");
     if !full {
-        println!("{DIM}Останавливаюсь на первой рабочей и быстрой. Полный перебор: net tune --all{RESET}");
+        println!(
+            "{DIM}Останавливаюсь на первой рабочей и быстрой. Полный перебор: net tune --all{RESET}"
+        );
     }
-    let best = tune::run(cfg, &tune::Options { full, verbose: true })?;
+    let best = tune::run(
+        cfg,
+        &tune::Options {
+            full,
+            verbose: true,
+        },
+    )?;
     println!(
         "\n{GREEN}Выбрана {}{RESET} — {}, {:.0} КБ/с",
         best.strategy,
-        if best.reachable { "YouTube открывается" } else { "YouTube так и не открылся" },
+        if best.reachable {
+            "YouTube открывается"
+        } else {
+            "YouTube так и не открылся"
+        },
         best.speed
     );
     Ok(())
@@ -994,8 +1040,11 @@ fn watch_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
         Some("install") => {
             let unit = watch::install(cfg)?;
             println!("{GREEN}Сторож в автозапуске{RESET}: {unit}");
-            println!("{DIM}Проверяет связь раз в {} мин, журнал: {}{RESET}",
-                cfg.watch_interval_min, watch::log_path().display());
+            println!(
+                "{DIM}Проверяет связь раз в {} мин, журнал: {}{RESET}",
+                cfg.watch_interval_min,
+                watch::log_path().display()
+            );
             Ok(())
         }
         Some("uninstall") => {
@@ -1012,7 +1061,9 @@ fn watch_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!("net watch [--once|install|uninstall|log], а не «{other}»")),
+        Some(other) => Err(format!(
+            "net watch [--once|install|uninstall|log], а не «{other}»"
+        )),
     }
 }
 
@@ -1027,9 +1078,14 @@ fn profile_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                     "Профиль: zapret {}, Telegram {}{}",
                     if p.zapret { "вкл" } else { "выкл" },
                     if p.telegram { "вкл" } else { "выкл" },
-                    p.strategy.as_ref().map(|s| format!(", стратегия {s}")).unwrap_or_default()
+                    p.strategy
+                        .as_ref()
+                        .map(|s| format!(", стратегия {s}"))
+                        .unwrap_or_default()
                 ),
-                None => println!("{DIM}Профиля для этой сети нет. Настрой как надо и сохрани: net profile save{RESET}"),
+                None => println!(
+                    "{DIM}Профиля для этой сети нет. Настрой как надо и сохрани: net profile save{RESET}"
+                ),
             }
             Ok(())
         }
@@ -1039,7 +1095,10 @@ fn profile_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 "{GREEN}Запомнил для сети «{network}»{RESET}: zapret {}, Telegram {}{}",
                 if p.zapret { "вкл" } else { "выкл" },
                 if p.telegram { "вкл" } else { "выкл" },
-                p.strategy.as_ref().map(|s| format!(", стратегия {s}")).unwrap_or_default()
+                p.strategy
+                    .as_ref()
+                    .map(|s| format!(", стратегия {s}"))
+                    .unwrap_or_default()
             );
             Ok(())
         }
@@ -1061,18 +1120,27 @@ fn profile_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             let here = profile::current_network();
             for (network, p) in all {
-                let mark = if Some(&network) == here.as_ref() { "●" } else { " " };
+                let mark = if Some(&network) == here.as_ref() {
+                    "●"
+                } else {
+                    " "
+                };
                 println!(
                     "{mark} {network}: zapret {}, Telegram {}{}",
                     if p.zapret { "вкл" } else { "выкл" },
                     if p.telegram { "вкл" } else { "выкл" },
-                    p.strategy.as_ref().map(|s| format!(", {s}")).unwrap_or_default()
+                    p.strategy
+                        .as_ref()
+                        .map(|s| format!(", {s}"))
+                        .unwrap_or_default()
                 );
             }
             Ok(())
         }
         Some("forget") => {
-            let network = rest.get(1).copied()
+            let network = rest
+                .get(1)
+                .copied()
                 .map(str::to_string)
                 .or_else(profile::current_network)
                 .ok_or("какую сеть забыть?")?;
@@ -1080,7 +1148,9 @@ fn profile_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             println!("Забыл «{network}»");
             Ok(())
         }
-        Some(other) => Err(format!("net profile [show|save|apply|list|forget], а не «{other}»")),
+        Some(other) => Err(format!(
+            "net profile [show|save|apply|list|forget], а не «{other}»"
+        )),
     }
 }
 
@@ -1148,7 +1218,9 @@ fn share_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(other) => Err(format!("net share [on|off|status|password|newpass|open], а не «{other}»")),
+        Some(other) => Err(format!(
+            "net share [on|off|status|password|newpass|open], а не «{other}»"
+        )),
     }
 }
 
@@ -1214,8 +1286,12 @@ fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
             if let Some(gw) = за_роутером {
                 println!("{GREEN}Шифрованный DNS работает через роутер {gw}{RESET}");
-                println!("{DIM}Свой резолвер тут только мешал бы: роутер решает, какой сайт{RESET}");
-                println!("{DIM}пустить через ноду, по тем самым запросам, которые мы бы у него{RESET}");
+                println!(
+                    "{DIM}Свой резолвер тут только мешал бы: роутер решает, какой сайт{RESET}"
+                );
+                println!(
+                    "{DIM}пустить через ноду, по тем самым запросам, которые мы бы у него{RESET}"
+                );
                 println!("{DIM}забрали — и такие сайты уходили бы напрямую.{RESET}");
                 return Ok(());
             }
@@ -1223,7 +1299,9 @@ fn dns_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 "{GREEN}Шифрованный DNS включён{RESET} — теперь его получают все программы, 
 а не только браузер со своей галочкой."
             );
-            println!("{DIM}Российские зоны идут российским резолвером напрямую: иначе банки,{RESET}");
+            println!(
+                "{DIM}Российские зоны идут российским резолвером напрямую: иначе банки,{RESET}"
+            );
             println!("{DIM}прячущие записи от иностранных, перестают открываться.{RESET}");
             println!("{DIM}Выключить: net dns off{RESET}");
             Ok(())
@@ -1256,7 +1334,9 @@ fn dns_status() {
             std::env::consts::OS
         );
         println!("{DIM}Сам резолвер пошёл бы и тут, не хватает способа сказать системе{RESET}");
-        println!("{DIM}«спрашивай его»: на Linux это systemd-resolved, тут нужен свой путь.{RESET}");
+        println!(
+            "{DIM}«спрашивай его»: на Linux это systemd-resolved, тут нужен свой путь.{RESET}"
+        );
         println!("{DIM}Пока DNS шифруется под поднятым туннелем: net vpn on{RESET}");
         return;
     }
@@ -1267,9 +1347,13 @@ fn dns_status() {
     if let Some(gw) = dns::шлюз_кита() {
         if dns::state() == dns::State::Off {
             println!("{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {GREEN}его шифрует роутер {gw}{RESET}");
-            println!("{DIM}свой резолвер тут не нужен: роутер и шифрует, и раскладывает домены{RESET}");
+            println!(
+                "{DIM}свой резолвер тут не нужен: роутер и шифрует, и раскладывает домены{RESET}"
+            );
         } else {
-            println!("{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {YELLOW}свой резолвер поверх роутера кита{RESET}");
+            println!(
+                "{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {YELLOW}свой резолвер поверх роутера кита{RESET}"
+            );
             println!("{DIM}Шифруется, но роутер {gw} перестаёт видеть, какие адреса{RESET}");
             println!("{DIM}запрашивает машина, и сайты из его списка уходят мимо ноды.{RESET}");
             println!("{DIM}Отдать DNS роутеру: net dns on{RESET}");
@@ -1286,8 +1370,10 @@ fn dns_status() {
         (dns::State::Off, false) => (DIM, "выключен"),
     };
     println!("{BOLD}ШИФРОВАННЫЙ DNS{RESET}  {color}{text}{RESET}");
-    println!("{DIM}резолвер 127.0.0.1:{} · наружу DoH к 1.1.1.1 · российские зоны — DoH к 77.88.8.8{RESET}",
-        dns::port());
+    println!(
+        "{DIM}резолвер 127.0.0.1:{} · наружу DoH к 1.1.1.1 · российские зоны — DoH к 77.88.8.8{RESET}",
+        dns::port()
+    );
     if state == dns::State::Off && !hooked {
         println!("{DIM}включить: net dns on{RESET}");
     }
@@ -1308,14 +1394,17 @@ fn dns_test() {
     println!("{BOLD}ШИФРОВАННЫЙ DNS — ПРОВЕРКА{RESET}\n");
 
     let подключена = dns::подключён();
-    отметить(подключена, &format!(
-        "система спрашивает   {}",
-        if подключена {
-            format!("127.0.0.1:{} — это мы", dns::port())
-        } else {
-            "DNS своей сети — резолвер не подключён".to_string()
-        }
-    ));
+    отметить(
+        подключена,
+        &format!(
+            "система спрашивает   {}",
+            if подключена {
+                format!("127.0.0.1:{} — это мы", dns::port())
+            } else {
+                "DNS своей сети — резолвер не подключён".to_string()
+            }
+        ),
+    );
 
     // Имена со случайной меткой: старое ушло бы в кэш, и запрос наружу не
     // случился бы вовсе — а нам нужно посмотреть именно на него.
@@ -1327,25 +1416,48 @@ fn dns_test() {
     let метка = format!("np{}", sub::now_secs() % 100_000);
     let заграничное = format!("{метка}.example.com");
     let российское = format!("{метка}.vtb.ru");
-    let живой = dns::ask("127.0.0.1", dns::port(), "example.com", Duration::from_secs(6));
-    отметить(живой.is_some(), &match &живой {
-        Some(ответ) if !ответ.адреса.is_empty() => format!(
-            "резолвер отвечает    example.com → {} за {} мс",
-            ответ.адреса[0],
-            ответ.заняло.as_millis()
-        ),
-        Some(_) => "резолвер отвечает    но без адресов".to_string(),
-        None => format!("резолвер молчит      на 127.0.0.1:{}", dns::port()),
-    });
+    let живой = dns::ask(
+        "127.0.0.1",
+        dns::port(),
+        "example.com",
+        Duration::from_secs(6),
+    );
+    отметить(
+        живой.is_some(),
+        &match &живой {
+            Some(ответ) if !ответ.адреса.is_empty() => format!(
+                "резолвер отвечает    example.com → {} за {} мс",
+                ответ.адреса[0],
+                ответ.заняло.as_millis()
+            ),
+            Some(_) => "резолвер отвечает    но без адресов".to_string(),
+            None => format!("резолвер молчит      на 127.0.0.1:{}", dns::port()),
+        },
+    );
 
-    let _ = dns::ask("127.0.0.1", dns::port(), &заграничное, Duration::from_secs(6));
-    let _ = dns::ask("127.0.0.1", dns::port(), &российское, Duration::from_secs(6));
+    let _ = dns::ask(
+        "127.0.0.1",
+        dns::port(),
+        &заграничное,
+        Duration::from_secs(6),
+    );
+    let _ = dns::ask(
+        "127.0.0.1",
+        dns::port(),
+        &российское,
+        Duration::from_secs(6),
+    );
     let (doh, ru) = dns::каналы();
     отметить(doh, "канал наружу         1.1.1.1:443 — шифрованный DoH");
-    отметить(ru, "российские зоны      77.88.8.8:443 — тоже DoH, чтоб банки жили");
+    отметить(
+        ru,
+        "российские зоны      77.88.8.8:443 — тоже DoH, чтоб банки жили",
+    );
 
     if doh && ru && подключена {
-        println!("\n{GREEN}Всё на месте: весь DNS машины шифруется, российское ходит своим путём.{RESET}");
+        println!(
+            "\n{GREEN}Всё на месте: весь DNS машины шифруется, российское ходит своим путём.{RESET}"
+        );
     } else if !подключена {
         println!("\n{DIM}Включить: net dns on{RESET}");
     } else {
@@ -1377,10 +1489,15 @@ fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             split::ensure_default_list().map_err(|e| e.to_string())?;
             let mut count = 0;
             for path in split::all_list_paths() {
-                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 let domains: Vec<&str> = text
                     .lines()
-                    .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') })
+                    .filter(|l| {
+                        let t = l.trim();
+                        !t.is_empty() && !t.starts_with('#')
+                    })
                     .collect();
                 if domains.is_empty() {
                     continue;
@@ -1431,17 +1548,23 @@ fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some("add") => {
-            let domain = rest.get(1).ok_or("какой домен добавить? net split add openai.com")?;
+            let domain = rest
+                .get(1)
+                .ok_or("какой домен добавить? net split add openai.com")?;
             let path = split::ensure_default_list().map_err(|e| e.to_string())?;
             let mut text = std::fs::read_to_string(&path).unwrap_or_default();
             if text.lines().any(|l| l.trim() == *domain) {
                 println!("{DIM}{domain} уже в списке{RESET}");
             } else {
-                if !text.ends_with('\n') { text.push('\n'); }
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
                 text.push_str(domain);
                 text.push('\n');
                 std::fs::write(&path, text).map_err(|e| e.to_string())?;
-                println!("{GREEN}Добавил {domain}{RESET} — перезапусти сплит: net split off && net split on");
+                println!(
+                    "{GREEN}Добавил {domain}{RESET} — перезапусти сплит: net split off && net split on"
+                );
             }
             Ok(())
         }
@@ -1449,32 +1572,48 @@ fn split_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             let up = &cfg.split_upstream;
             let node_ok = socks::reachable(up, std::time::Duration::from_secs(2));
             if probe::port_open(cfg.split_port, std::time::Duration::from_millis(400)) {
-                println!("{GREEN}Сплит работает{RESET} на 127.0.0.1:{}", cfg.split_port);
+                println!(
+                    "{GREEN}Сплит работает{RESET} на 127.0.0.1:{}",
+                    cfg.split_port
+                );
             } else {
                 println!("{RED}Сплит выключен{RESET}  ({DIM}включить: net split on{RESET})");
             }
             if node_ok {
                 println!("{GREEN}Нода-SOCKS {up} отвечает{RESET}");
             } else {
-                println!("{YELLOW}Нода-SOCKS {up} молчит — включи VPN-клиент в режиме прокси{RESET}");
+                println!(
+                    "{YELLOW}Нода-SOCKS {up} молчит — включи VPN-клиент в режиме прокси{RESET}"
+                );
             }
             Ok(())
         }
-        Some(other) => Err(format!("net split [on|off|status|list|add|update], а не «{other}»")),
+        Some(other) => Err(format!(
+            "net split [on|off|status|list|add|update], а не «{other}»"
+        )),
     }
 }
 
 fn print_split_hint(cfg: &Config) {
     println!("Сплит-прокси: {BOLD}127.0.0.1:{}{RESET}", cfg.split_port);
-    println!("{DIM}Домены из списка идут через ноду {}, остальное напрямую.{RESET}", cfg.split_upstream);
-    println!("{DIM}Список: net split list.  Прописать прокси в системе — тогда весь браузер разделится сам.{RESET}");
+    println!(
+        "{DIM}Домены из списка идут через ноду {}, остальное напрямую.{RESET}",
+        cfg.split_upstream
+    );
+    println!(
+        "{DIM}Список: net split list.  Прописать прокси в системе — тогда весь браузер разделится сам.{RESET}"
+    );
     // Сплит писался под времена, когда ноду держал Happ в режиме прокси. Своё
     // ядро делит трафик само, по правилам маршрутизации, и второй делитель
     // поверх него — лишний слой.
     if singbox::Core::new(cfg).state() == singbox::State::Up {
-        println!("{YELLOW}Свой туннель уже поднят и делит трафик сам — сплит поверх него не нужен.{RESET}");
+        println!(
+            "{YELLOW}Свой туннель уже поднят и делит трафик сам — сплит поверх него не нужен.{RESET}"
+        );
     } else if !socks::reachable(&cfg.split_upstream, std::time::Duration::from_secs(2)) {
-        println!("{YELLOW}Сейчас нода-SOCKS не отвечает: подними Happ в режиме прокси (не TUN) или свой туннель — net vpn on.{RESET}");
+        println!(
+            "{YELLOW}Сейчас нода-SOCKS не отвечает: подними Happ в режиме прокси (не TUN) или свой туннель — net vpn on.{RESET}"
+        );
     }
 }
 
@@ -1486,7 +1625,13 @@ fn print_split_hint(cfg: &Config) {
 /// И главное: `enable --now` возвращается раньше, чем служба успевает занять
 /// порт, поэтому дожидаемся порта — иначе следующая же команда честно скажет
 /// «выключено» о том, что секунду назад включили.
-fn user_service(action: &str, name: &str, description: &str, command: &str, port: u16) -> Result<(), String> {
+fn user_service(
+    action: &str,
+    name: &str,
+    description: &str,
+    command: &str,
+    port: u16,
+) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err(format!(
             "служба на {} ещё не подведена — запусти «netpult {command}» вручную",
@@ -1569,14 +1714,20 @@ fn print_share_hint(port: u16, password: Option<&str>) {
     match password {
         Some(pass) => {
             println!("Логин {BOLD}netpult{RESET}, пароль {BOLD}{pass}{RESET}");
-            println!("{DIM}Телефон: настройки Wi-Fi → эта сеть → прокси вручную → узел {ip}, порт {port},{RESET}");
+            println!(
+                "{DIM}Телефон: настройки Wi-Fi → эта сеть → прокси вручную → узел {ip}, порт {port},{RESET}"
+            );
             println!("{DIM}проверка подлинности вкл, имя netpult, пароль выше.{RESET}");
         }
         None => {
-            println!("{DIM}Телефон: настройки Wi-Fi → эта сеть → прокси вручную → узел {ip}, порт {port}.{RESET}");
+            println!(
+                "{DIM}Телефон: настройки Wi-Fi → эта сеть → прокси вручную → узел {ip}, порт {port}.{RESET}"
+            );
         }
     }
-    println!("{DIM}Трафик телефона пойдёт через этот компьютер и через zapret. Выключить: net share off.{RESET}");
+    println!(
+        "{DIM}Трафик телефона пойдёт через этот компьютер и через zapret. Выключить: net share off.{RESET}"
+    );
 }
 
 pub fn share_service_public(action: &str, port: u16) -> Result<(), String> {
@@ -1667,12 +1818,7 @@ pub fn status_lines(cfg: &Config) -> Vec<Status> {
     let mut lines = Vec::new();
 
     lines.push(match z.state() {
-        zapret::State::On => Status::new(
-            true,
-            "zapret",
-            "ВКЛ",
-            &z.strategy().unwrap_or_default(),
-        ),
+        zapret::State::On => Status::new(true, "zapret", "ВКЛ", &z.strategy().unwrap_or_default()),
         zapret::State::Off => Status::new(false, "zapret", "ВЫКЛ", ""),
         // На маке и в Windows свой движок zapret ставится отдельно и пультом
         // пока не управляется — пугать этим красной строкой незачем.
@@ -1710,7 +1856,11 @@ pub fn status_lines(cfg: &Config) -> Vec<Status> {
             node,
             "Сплит",
             "ВКЛ",
-            if node { "нода отвечает" } else { "нода молчит" },
+            if node {
+                "нода отвечает"
+            } else {
+                "нода молчит"
+            },
         ));
     }
     if probe::port_open(cfg.share_port, Duration::from_millis(300)) {
@@ -1780,7 +1930,9 @@ pub fn первый_запуск(cfg: &Config) -> bool {
 pub fn print_first_run() {
     println!("{BOLD}netpult{RESET} — пульт обхода блокировок. Пока пусто, начнём.\n");
     println!("  1. {BOLD}net deps install{RESET}   поставить то, чем обходят:");
-    println!("     {DIM}zapret (YouTube, Discord), tglock (Telegram), ядро sing-box (туннель){RESET}");
+    println!(
+        "     {DIM}zapret (YouTube, Discord), tglock (Telegram), ядро sing-box (туннель){RESET}"
+    );
     println!("  2. {BOLD}net on{RESET}             включить обход DPI");
     println!("     {DIM}не помогло — net tune подберёт стратегию перебором{RESET}");
     println!("  3. {BOLD}net vpn sub <ссылка>{RESET}  подписка, если она есть:");
@@ -1810,7 +1962,11 @@ pub fn run_test_public(cfg: &Config) {
     println!(
         "Стратегия: {}   zapret: {}",
         z.strategy().unwrap_or_else(|| "?".into()),
-        if z.state() == zapret::State::On { "включён" } else { "выключен" }
+        if z.state() == zapret::State::On {
+            "включён"
+        } else {
+            "выключен"
+        }
     );
     if !probe::curl_available() {
         println!("{YELLOW}curl не найден — проверить доступность нечем{RESET}");
@@ -1865,7 +2021,10 @@ pub fn run_test_public(cfg: &Config) {
     }
 
     if Telegram::new(cfg).running() {
-        println!("{GREEN}  прокси TGLock — слушает порт {}{RESET}", cfg.tg_port);
+        println!(
+            "{GREEN}  прокси TGLock — слушает порт {}{RESET}",
+            cfg.tg_port
+        );
     }
 
     ход.step("скорость");
@@ -2022,11 +2181,7 @@ fn ensure_dep(cfg: &Config, kind: deps::Kind) -> Result<(), String> {
     if deps::find(kind, cfg).is_some() {
         return Ok(());
     }
-    println!(
-        "{YELLOW}Нет {}{RESET} — {}",
-        kind.title(),
-        kind.about()
-    );
+    println!("{YELLOW}Нет {}{RESET} — {}", kind.title(), kind.about());
     if !ask_yes("Поставить сейчас?") {
         return Err(format!(
             "без {} эта команда не работает. Поставить позже: net deps install {}",
@@ -2055,8 +2210,9 @@ fn deps_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                     .into_iter()
                     .filter(|k| deps::find(*k, cfg).is_none())
                     .collect(),
-                Some(word) => vec![deps::Kind::parse(word)
-                    .ok_or_else(|| format!("не знаю такой зависимости: {word}. Есть zapret, tglock, core"))?],
+                Some(word) => vec![deps::Kind::parse(word).ok_or_else(|| {
+                    format!("не знаю такой зависимости: {word}. Есть zapret, tglock, core")
+                })?],
             };
             if kinds.is_empty() {
                 println!("{GREEN}Всё на месте.{RESET} Что где лежит: net deps");
@@ -2083,7 +2239,10 @@ fn deps_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             }
         }
         Some("use") | Some("path") => {
-            let word = rest.get(1).copied().ok_or("net deps use <zapret|tglock|core> <путь>")?;
+            let word = rest
+                .get(1)
+                .copied()
+                .ok_or("net deps use <zapret|tglock|core> <путь>")?;
             let kind = deps::Kind::parse(word)
                 .ok_or_else(|| format!("не знаю такой зависимости: {word}"))?;
             let path = rest.get(2).ok_or("не сказано, какой путь запомнить")?;
@@ -2092,7 +2251,11 @@ fn deps_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 return Err(format!("нет такого пути: {}", path.display()));
             }
             deps::remember(kind, &path)?;
-            println!("{GREEN}Запомнил:{RESET} {} → {}", kind.title(), path.display());
+            println!(
+                "{GREEN}Запомнил:{RESET} {} → {}",
+                kind.title(),
+                path.display()
+            );
             Ok(())
         }
         Some(other) => Err(unknown_sub("deps", other)),
@@ -2118,8 +2281,15 @@ fn print_deps(cfg: &Config) {
             }
             None => {
                 missing.push(kind);
-                println!("  {RED}✗{RESET} {:<14} {DIM}нет — {}{RESET}", kind.title(), kind.about());
-                println!("     {DIM}без него не работает: {}{RESET}", kind.needed_for());
+                println!(
+                    "  {RED}✗{RESET} {:<14} {DIM}нет — {}{RESET}",
+                    kind.title(),
+                    kind.about()
+                );
+                println!(
+                    "     {DIM}без него не работает: {}{RESET}",
+                    kind.needed_for()
+                );
             }
         }
     }
@@ -2157,7 +2327,9 @@ fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 }
                 calls::Способ::ПолныйТуннель => {
                     println!("{GREEN}Звонки внутри полного туннеля{RESET}");
-                    println!("{DIM}Через ноду идёт весь интернет. Только Telegram: net calls on{RESET}");
+                    println!(
+                        "{DIM}Через ноду идёт весь интернет. Только Telegram: net calls on{RESET}"
+                    );
                 }
                 calls::Способ::Dpi => {
                     println!("{YELLOW}Звонки прикрыты дурением DPI{RESET}");
@@ -2166,7 +2338,9 @@ fn calls_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 calls::Способ::Роутер(gw) => {
                     println!("{YELLOW}Эта машина за своим роутером {gw}{RESET}");
                     println!("Голос всех домашних устройств решается на нём, а не здесь.");
-                    println!("{DIM}Туннель именно отсюда, поверх роутера: net calls on --here{RESET}");
+                    println!(
+                        "{DIM}Туннель именно отсюда, поверх роутера: net calls on --here{RESET}"
+                    );
                 }
                 calls::Способ::Никак => {
                     println!("{RED}Звонки ничем не прикрыты{RESET}");
@@ -2219,7 +2393,8 @@ mod tests {
             .map(|(name, _)| *name)
             .filter(|name| {
                 let первое_слово = name.split_whitespace().next().unwrap_or(name);
-                !help.contains(&format!("net {name}")) && !help.contains(&format!("net {первое_слово} "))
+                !help.contains(&format!("net {name}"))
+                    && !help.contains(&format!("net {первое_слово} "))
             })
             .collect();
         assert!(потеряны.is_empty(), "нет в справке: {потеряны:?}");
@@ -2235,11 +2410,14 @@ mod tests {
         let mut чужие = Vec::new();
         for line in help_text().lines() {
             let line = line.trim();
-            let Some(rest) = line.strip_prefix("net ") else { continue };
+            let Some(rest) = line.strip_prefix("net ") else {
+                continue;
+            };
             let слово = rest.split_whitespace().next().unwrap_or("");
             // Пояснения к строке «net» без команды написаны по-русски; сами
             // команды — латиницей, по ним и судим.
-            if слово.is_empty() || !слово.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            if слово.is_empty() || !слово.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
                 continue;
             }
             if !known.contains(&слово) {
@@ -2248,6 +2426,9 @@ mod tests {
         }
         чужие.sort();
         чужие.dedup();
-        assert!(чужие.is_empty(), "справка зовёт в несуществующее: {чужие:?}");
+        assert!(
+            чужие.is_empty(),
+            "справка зовёт в несуществующее: {чужие:?}"
+        );
     }
 }

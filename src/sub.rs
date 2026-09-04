@@ -177,10 +177,7 @@ impl Node {
                     format!("\"path\": {}", json::escape(path)),
                 ];
                 if let Some(h) = host {
-                    parts.push(format!(
-                        "\"headers\": {{\"Host\": {}}}",
-                        json::escape(h)
-                    ));
+                    parts.push(format!("\"headers\": {{\"Host\": {}}}", json::escape(h)));
                 }
                 Some(format!("{{{}}}", parts.join(", ")))
             }
@@ -607,9 +604,18 @@ fn parse_vmess(rest: &str) -> Option<Node> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}:{}", node.server, node.port));
-    node.tls = matches!(value.get("tls").and_then(|v| v.as_str()).as_deref(), Some("tls"));
-    node.sni = value.get("sni").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let host = value.get("host").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    node.tls = matches!(
+        value.get("tls").and_then(|v| v.as_str()).as_deref(),
+        Some("tls")
+    );
+    node.sni = value
+        .get("sni")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let host = value
+        .get("host")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let path = value
         .get("path")
         .and_then(|v| v.as_str())
@@ -662,9 +668,18 @@ fn parse_json(text: &str) -> Result<Vec<Node>, String> {
     if let Some(servers) = value.get("servers") {
         for item in servers.arr() {
             let mut node = Node::blank(Kind::Shadowsocks);
-            node.server = item.get("server").and_then(|v| v.as_str()).unwrap_or_default();
-            node.port = item.get("server_port").and_then(|v| v.as_u16()).unwrap_or(0);
-            node.secret = item.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+            node.server = item
+                .get("server")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            node.port = item
+                .get("server_port")
+                .and_then(|v| v.as_u16())
+                .unwrap_or(0);
+            node.secret = item
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.method = item.get("method").and_then(|v| v.as_str());
             node.name = item
                 .get("remarks")
@@ -691,7 +706,12 @@ fn parse_json(text: &str) -> Result<Vec<Node>, String> {
 }
 
 fn node_from_outbound(item: &Json) -> Option<Node> {
-    let kind = match item.get("type").or_else(|| item.get("protocol"))?.as_str()?.as_str() {
+    let kind = match item
+        .get("type")
+        .or_else(|| item.get("protocol"))?
+        .as_str()?
+        .as_str()
+    {
         "vless" => Kind::Vless,
         "vmess" => Kind::Vmess,
         "trojan" => Kind::Trojan,
@@ -716,11 +736,20 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         node.method = item.get("method").and_then(|v| v.as_str());
-        node.flow = item.get("flow").and_then(|v| v.as_str()).filter(|f| !f.is_empty());
+        node.flow = item
+            .get("flow")
+            .and_then(|v| v.as_str())
+            .filter(|f| !f.is_empty());
         if let Some(tls) = item.get("tls") {
-            node.tls = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            node.tls = tls
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             node.sni = tls.get("server_name").and_then(|v| v.as_str());
-            node.insecure = tls.get("insecure").and_then(|v| v.as_bool()).unwrap_or(false);
+            node.insecure = tls
+                .get("insecure")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             node.alpn = tls
                 .get("alpn")
                 .map(|a| a.arr().iter().filter_map(|v| v.as_str()).collect())
@@ -772,13 +801,22 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
                 .or_else(|| user.get("password"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            node.flow = user.get("flow").and_then(|v| v.as_str()).filter(|f| !f.is_empty());
+            node.flow = user
+                .get("flow")
+                .and_then(|v| v.as_str())
+                .filter(|f| !f.is_empty());
         } else {
-            node.secret = peer.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+            node.secret = peer
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.method = peer.get("method").and_then(|v| v.as_str());
         }
         if let Some(stream) = item.get("streamSettings") {
-            let security = stream.get("security").and_then(|v| v.as_str()).unwrap_or_default();
+            let security = stream
+                .get("security")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.tls = security == "tls" || security == "reality";
             let tls_settings = stream
                 .get("tlsSettings")
@@ -788,9 +826,15 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
                 node.fingerprint = t.get("fingerprint").and_then(|v| v.as_str());
                 node.reality_key = t.get("publicKey").and_then(|v| v.as_str());
                 node.reality_short_id = t.get("shortId").and_then(|v| v.as_str());
-                node.insecure = t.get("allowInsecure").and_then(|v| v.as_bool()).unwrap_or(false);
+                node.insecure = t
+                    .get("allowInsecure")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
             }
-            let network = stream.get("network").and_then(|v| v.as_str()).unwrap_or_default();
+            let network = stream
+                .get("network")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.transport = match network.as_str() {
                 "ws" => Transport::Ws {
                     path: stream
@@ -921,10 +965,14 @@ fn clash_node(fields: &[(String, String)]) -> Option<Node> {
     node.method = get("cipher");
     node.flow = get("flow");
     node.name = get("name").unwrap_or_else(|| format!("{}:{}", node.server, node.port));
-    node.tls = get("tls").map(|v| v == "true").unwrap_or(node.kind == Kind::Trojan);
+    node.tls = get("tls")
+        .map(|v| v == "true")
+        .unwrap_or(node.kind == Kind::Trojan);
     node.sni = get("servername").or_else(|| get("sni"));
     node.fingerprint = get("client-fingerprint");
-    node.insecure = get("skip-cert-verify").map(|v| v == "true").unwrap_or(false);
+    node.insecure = get("skip-cert-verify")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     if let Some(key) = get("public-key") {
         node.tls = true;
         node.reality_key = Some(key);
@@ -1096,7 +1144,10 @@ pub fn save_bank(entries: &[Kept]) -> Result<(), String> {
     let body: Vec<String> = entries.iter().map(|k| k.node.to_outbound()).collect();
     let seen: Vec<String> = entries
         .iter()
-        .filter_map(|k| k.last_ok.map(|t| format!("{}: {t}", json::escape(&place(&k.node)))))
+        .filter_map(|k| {
+            k.last_ok
+                .map(|t| format!("{}: {t}", json::escape(&place(&k.node))))
+        })
         .collect();
     let first: Vec<String> = entries
         .iter()
@@ -1365,7 +1416,6 @@ pub fn load_nodes() -> Result<Vec<SavedNode>, String> {
 pub struct SavedNode {
     pub name: String,
 }
-
 
 #[cfg(test)]
 mod bank_tests {

@@ -10,8 +10,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::{deps, dns, probe, singbox, sub, watch, zapret};
 use crate::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
+use crate::{deps, dns, probe, singbox, sub, watch, zapret};
 use crate::{telegram::Telegram, zapret::Zapret};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -69,7 +69,13 @@ impl Check {
         }
     }
 
-    fn bad(verdict: Verdict, name: &str, detail: impl Into<String>, command: &str, safe: bool) -> Check {
+    fn bad(
+        verdict: Verdict,
+        name: &str,
+        detail: impl Into<String>,
+        command: &str,
+        safe: bool,
+    ) -> Check {
         Check {
             name: name.into(),
             verdict,
@@ -213,7 +219,9 @@ fn basics() -> Vec<Check> {
 
     // Имена. Резолвинг ломается отдельно от связи, и симптом у него чужой:
     // «всё висит», хотя сеть цела.
-    if probe::reachable("https://1.1.1.1/", QUICK) && !probe::reachable("https://cloudflare.com/", QUICK) {
+    if probe::reachable("https://1.1.1.1/", QUICK)
+        && !probe::reachable("https://cloudflare.com/", QUICK)
+    {
         checks.push(Check::bad(
             Verdict::Fail,
             "имена не разрешаются",
@@ -317,7 +325,10 @@ fn bypass(cfg: &Config) -> Vec<Check> {
             false,
         ));
     } else {
-        checks.push(Check::ok("обход работает", format!("{strategy}, видео открывается")));
+        checks.push(Check::ok(
+            "обход работает",
+            format!("{strategy}, видео открывается"),
+        ));
     }
     checks
 }
@@ -396,7 +407,11 @@ fn extras() -> Vec<Check> {
     match dns::state() {
         dns::State::Up => checks.push(Check::ok(
             "DNS шифруется",
-            if dns::подключён() { "система направлена на свой резолвер" } else { "резолвер поднят, но система его не спрашивает" },
+            if dns::подключён() {
+                "система направлена на свой резолвер"
+            } else {
+                "резолвер поднят, но система его не спрашивает"
+            },
         )),
         dns::State::Broken => checks.push(Check::bad(
             Verdict::Fail,

@@ -9,7 +9,7 @@
 //! `127.0.0.1:10808`, когда выбрана нода. Так HWID-замок Happ не трогается и
 //! ротация нод работает сама.
 
-use crate::config::{state_dir, Config};
+use crate::config::{Config, state_dir};
 use crate::socks;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -50,9 +50,9 @@ impl DomainList {
     /// Идёт ли хост через ноду.
     pub fn matches(&self, host: &str) -> bool {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        self.suffixes.iter().any(|suffix| {
-            host == *suffix || host.ends_with(&format!(".{suffix}"))
-        })
+        self.suffixes
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
     }
 }
 
@@ -69,7 +69,11 @@ pub fn log_path() -> std::path::PathBuf {
 /// а что напрямую. Лог сам себя подрезает, чтобы не разрастаться без предела.
 fn log_decision(host: &str, via_node: bool) {
     use std::io::Write;
-    let mark = if via_node { "нода  " } else { "прямо " };
+    let mark = if via_node {
+        "нода  "
+    } else {
+        "прямо "
+    };
     let stamp = std::process::Command::new("date")
         .arg("+%H:%M:%S")
         .output()
@@ -81,13 +85,17 @@ fn log_decision(host: &str, via_node: bool) {
     // Раз в сотню запросов подрезаем хвост, оставляя последние ~500 строк.
     if let Ok(meta) = std::fs::metadata(&path)
         && meta.len() > 200_000
-            && let Ok(text) = std::fs::read_to_string(&path) {
-                let tail: Vec<&str> = text.lines().rev().take(500).collect();
-                let trimmed: String =
-                    tail.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n";
-                std::fs::write(&path, trimmed).ok();
-            }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        let tail: Vec<&str> = text.lines().rev().take(500).collect();
+        let trimmed: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&path, trimmed).ok();
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         writeln!(f, "{stamp}  {mark}  {host}").ok();
     }
 }
@@ -126,10 +134,12 @@ pub fn update_geoblock() -> Result<usize, String> {
         if let Ok(out) = std::process::Command::new("curl")
             .args(["-fsSL", "--max-time", "30", url])
             .output()
-            && out.status.success() && out.stdout.len() > 1000 {
-                body = String::from_utf8_lossy(&out.stdout).into_owned();
-                break;
-            }
+            && out.status.success()
+            && out.stdout.len() > 1000
+        {
+            body = String::from_utf8_lossy(&out.stdout).into_owned();
+            break;
+        }
     }
     if body.is_empty() {
         return Err("не скачался список геоблока (все зеркала молчат)".into());
@@ -142,7 +152,10 @@ pub fn update_geoblock() -> Result<usize, String> {
 
     // Защита от битой загрузки: пустой/куцый ответ не затирает рабочий список.
     if domains.len() < 100 {
-        return Err(format!("подозрительно короткий список ({}), не сохраняю", domains.len()));
+        return Err(format!(
+            "подозрительно короткий список ({}), не сохраняю",
+            domains.len()
+        ));
     }
 
     std::fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
@@ -200,9 +213,10 @@ pub fn serve(cfg: &Config) -> Result<(), String> {
         let list = std::sync::Arc::clone(&list);
         std::thread::spawn(move || {
             if let Err(e) = handle(client, &upstream, &list)
-                && std::env::var_os("NETPULT_DEBUG").is_some() {
-                    eprintln!("сплит: соединение оборвалось: {e}");
-                }
+                && std::env::var_os("NETPULT_DEBUG").is_some()
+            {
+                eprintln!("сплит: соединение оборвалось: {e}");
+            }
         });
     }
     Ok(())
@@ -352,7 +366,13 @@ mod tests {
 
     #[test]
     fn parses_authority() {
-        assert_eq!(parse_authority("example.com:443", 80), ("example.com".into(), 443));
-        assert_eq!(parse_authority("example.com", 80), ("example.com".into(), 80));
+        assert_eq!(
+            parse_authority("example.com:443", 80),
+            ("example.com".into(), 443)
+        );
+        assert_eq!(
+            parse_authority("example.com", 80),
+            ("example.com".into(), 80)
+        );
     }
 }

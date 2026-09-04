@@ -11,8 +11,8 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 8899;
@@ -43,7 +43,8 @@ impl Auth {
             return true;
         };
         headers.iter().any(|line| {
-            line.to_ascii_lowercase().starts_with("proxy-authorization:")
+            line.to_ascii_lowercase()
+                .starts_with("proxy-authorization:")
                 && line.split_whitespace().next_back() == Some(expected.as_str())
         })
     }
@@ -53,7 +54,11 @@ fn base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         for i in 0..4 {
             if i <= chunk.len() {
@@ -73,9 +78,11 @@ pub struct Stats {
 /// Запускает прокси и обслуживает подключения, пока процесс жив.
 pub fn serve(port: u16, password: Option<&str>) -> Result<(), String> {
     let auth = Arc::new(Auth::new(password));
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .map_err(|e| format!("не занять порт {port}: {e}"))?;
-    let stats = Arc::new(Stats { connections: AtomicUsize::new(0) });
+    let listener =
+        TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("не занять порт {port}: {e}"))?;
+    let stats = Arc::new(Stats {
+        connections: AtomicUsize::new(0),
+    });
 
     for incoming in listener.incoming() {
         let Ok(client) = incoming else { continue };
@@ -84,9 +91,10 @@ pub fn serve(port: u16, password: Option<&str>) -> Result<(), String> {
         std::thread::spawn(move || {
             stats.connections.fetch_add(1, Ordering::Relaxed);
             if let Err(e) = handle(client, &auth)
-                && std::env::var_os("NETPULT_DEBUG").is_some() {
-                    eprintln!("соединение оборвалось: {e}");
-                }
+                && std::env::var_os("NETPULT_DEBUG").is_some()
+            {
+                eprintln!("соединение оборвалось: {e}");
+            }
         });
     }
     Ok(())
@@ -284,6 +292,9 @@ mod tests {
     #[test]
     fn adds_default_port() {
         assert_eq!(with_default_port("example.com", 443), "example.com:443");
-        assert_eq!(with_default_port("example.com:8443", 443), "example.com:8443");
+        assert_eq!(
+            with_default_port("example.com:8443", 443),
+            "example.com:8443"
+        );
     }
 }
