@@ -1,7 +1,12 @@
 [package]
 name = "netpult"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
 crossterm = "0.28"
+
+# Пульт — CLI, релизный бинарь никто не отлаживает. strip убирает символы
+# (важно для сборки под роутер: ~2 МБ → ~1.5 МБ статикой на его флеше).
+[profile.release]
+strip = true

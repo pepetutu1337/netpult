@@ -62,7 +62,9 @@ fn home_rank(ip: &IpAddr) -> u8 {
 /// списка тащить libc и getifaddrs незачем.
 fn interface_addresses() -> Vec<IpAddr> {
     let output = if cfg!(target_os = "linux") {
-        Command::new("ip").args(["-4", "-o", "addr", "show"]).output()
+        Command::new("ip")
+            .args(["-4", "-o", "addr", "show"])
+            .output()
     } else if cfg!(target_os = "macos") {
         Command::new("ifconfig").arg("-a").output()
     } else {
@@ -168,7 +170,11 @@ fn find_video_host(page: &str) -> Option<String> {
     let head = page[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))? + 1;
     let tail = page[at..].find(".googlevideo.com")? + at + ".googlevideo.com".len();
     let host = &page[head..tail];
-    if host.len() > 200 { None } else { Some(host.to_string()) }
+    if host.len() > 200 {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 /// Ответ видео-CDN на два приветствия TLS: обычное и браузерное.
@@ -212,7 +218,15 @@ pub fn video(timeout: Duration) -> Video {
 
 fn video_browser_hello(url: &str, timeout: Duration) -> Option<bool> {
     match curl_full(
-        &["-o", NULL_DEVICE, "-w", "%{http_code}", "--curves", BROWSER_CURVES, url],
+        &[
+            "-o",
+            NULL_DEVICE,
+            "-w",
+            "%{http_code}",
+            "--curves",
+            BROWSER_CURVES,
+            url,
+        ],
         timeout,
     ) {
         Ok(text) => Some(text.trim().parse::<u32>().map(|c| c > 0).unwrap_or(false)),
@@ -264,7 +278,11 @@ pub fn connected_peers(port: u16) -> Vec<String> {
         .lines()
         .filter_map(|line| line.split_whitespace().nth(3)) // Peer Address:Port
         .filter_map(|peer| peer.rsplit_once(':').map(|(addr, _)| addr))
-        .map(|addr| addr.trim_start_matches('[').trim_end_matches(']').to_string())
+        .map(|addr| {
+            addr.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string()
+        })
         .filter(|addr| addr != "127.0.0.1" && addr != "::1" && !addr.is_empty())
         .collect();
     peers.sort();
@@ -355,7 +373,11 @@ mod tests {
 
     #[test]
     fn перекос_в_сторону_консоли_виден() {
-        let v = Video { checked: true, plain: true, browser: Some(false) };
+        let v = Video {
+            checked: true,
+            plain: true,
+            browser: Some(false),
+        };
         assert!(!v.ok());
         assert!(v.console_only());
     }

@@ -30,7 +30,7 @@ fn подписка_из_файла_разбирается_командой_с_�
     std::fs::write(&sample, "vless://uuid@example.com:443?security=tls#Нода").unwrap();
     let (ok, text) = run(&["vpn", "sub", &format!("file://{}", sample.display())]);
     assert!(ok, "разбор не удался: {text}");
-    assert!(text.contains("Разобрано нод: 1"), "{text}");
+    assert!(text.contains("Актив: 1"), "{text}");
 }
 
 #[test]

@@ -222,7 +222,9 @@ impl<'a> Parser<'a> {
         for _ in 0..4 {
             let c = *self.s.get(self.i).ok_or("оборвался \\u")?;
             self.i += 1;
-            let digit = c.to_digit(16).ok_or_else(|| format!("не шестнадцатеричная цифра: {c}"))?;
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| format!("не шестнадцатеричная цифра: {c}"))?;
             value = value * 16 + digit;
         }
         Ok(value)

@@ -177,10 +177,7 @@ impl Node {
                     format!("\"path\": {}", json::escape(path)),
                 ];
                 if let Some(h) = host {
-                    parts.push(format!(
-                        "\"headers\": {{\"Host\": {}}}",
-                        json::escape(h)
-                    ));
+                    parts.push(format!("\"headers\": {{\"Host\": {}}}", json::escape(h)));
                 }
                 Some(format!("{{{}}}", parts.join(", ")))
             }
@@ -607,9 +604,18 @@ fn parse_vmess(rest: &str) -> Option<Node> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}:{}", node.server, node.port));
-    node.tls = matches!(value.get("tls").and_then(|v| v.as_str()).as_deref(), Some("tls"));
-    node.sni = value.get("sni").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let host = value.get("host").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    node.tls = matches!(
+        value.get("tls").and_then(|v| v.as_str()).as_deref(),
+        Some("tls")
+    );
+    node.sni = value
+        .get("sni")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let host = value
+        .get("host")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let path = value
         .get("path")
         .and_then(|v| v.as_str())
@@ -662,9 +668,18 @@ fn parse_json(text: &str) -> Result<Vec<Node>, String> {
     if let Some(servers) = value.get("servers") {
         for item in servers.arr() {
             let mut node = Node::blank(Kind::Shadowsocks);
-            node.server = item.get("server").and_then(|v| v.as_str()).unwrap_or_default();
-            node.port = item.get("server_port").and_then(|v| v.as_u16()).unwrap_or(0);
-            node.secret = item.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+            node.server = item
+                .get("server")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            node.port = item
+                .get("server_port")
+                .and_then(|v| v.as_u16())
+                .unwrap_or(0);
+            node.secret = item
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.method = item.get("method").and_then(|v| v.as_str());
             node.name = item
                 .get("remarks")
@@ -691,7 +706,12 @@ fn parse_json(text: &str) -> Result<Vec<Node>, String> {
 }
 
 fn node_from_outbound(item: &Json) -> Option<Node> {
-    let kind = match item.get("type").or_else(|| item.get("protocol"))?.as_str()?.as_str() {
+    let kind = match item
+        .get("type")
+        .or_else(|| item.get("protocol"))?
+        .as_str()?
+        .as_str()
+    {
         "vless" => Kind::Vless,
         "vmess" => Kind::Vmess,
         "trojan" => Kind::Trojan,
@@ -716,11 +736,20 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         node.method = item.get("method").and_then(|v| v.as_str());
-        node.flow = item.get("flow").and_then(|v| v.as_str()).filter(|f| !f.is_empty());
+        node.flow = item
+            .get("flow")
+            .and_then(|v| v.as_str())
+            .filter(|f| !f.is_empty());
         if let Some(tls) = item.get("tls") {
-            node.tls = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            node.tls = tls
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             node.sni = tls.get("server_name").and_then(|v| v.as_str());
-            node.insecure = tls.get("insecure").and_then(|v| v.as_bool()).unwrap_or(false);
+            node.insecure = tls
+                .get("insecure")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             node.alpn = tls
                 .get("alpn")
                 .map(|a| a.arr().iter().filter_map(|v| v.as_str()).collect())
@@ -772,13 +801,22 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
                 .or_else(|| user.get("password"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            node.flow = user.get("flow").and_then(|v| v.as_str()).filter(|f| !f.is_empty());
+            node.flow = user
+                .get("flow")
+                .and_then(|v| v.as_str())
+                .filter(|f| !f.is_empty());
         } else {
-            node.secret = peer.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+            node.secret = peer
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.method = peer.get("method").and_then(|v| v.as_str());
         }
         if let Some(stream) = item.get("streamSettings") {
-            let security = stream.get("security").and_then(|v| v.as_str()).unwrap_or_default();
+            let security = stream
+                .get("security")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.tls = security == "tls" || security == "reality";
             let tls_settings = stream
                 .get("tlsSettings")
@@ -788,9 +826,15 @@ fn node_from_outbound(item: &Json) -> Option<Node> {
                 node.fingerprint = t.get("fingerprint").and_then(|v| v.as_str());
                 node.reality_key = t.get("publicKey").and_then(|v| v.as_str());
                 node.reality_short_id = t.get("shortId").and_then(|v| v.as_str());
-                node.insecure = t.get("allowInsecure").and_then(|v| v.as_bool()).unwrap_or(false);
+                node.insecure = t
+                    .get("allowInsecure")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
             }
-            let network = stream.get("network").and_then(|v| v.as_str()).unwrap_or_default();
+            let network = stream
+                .get("network")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             node.transport = match network.as_str() {
                 "ws" => Transport::Ws {
                     path: stream
@@ -921,10 +965,14 @@ fn clash_node(fields: &[(String, String)]) -> Option<Node> {
     node.method = get("cipher");
     node.flow = get("flow");
     node.name = get("name").unwrap_or_else(|| format!("{}:{}", node.server, node.port));
-    node.tls = get("tls").map(|v| v == "true").unwrap_or(node.kind == Kind::Trojan);
+    node.tls = get("tls")
+        .map(|v| v == "true")
+        .unwrap_or(node.kind == Kind::Trojan);
     node.sni = get("servername").or_else(|| get("sni"));
     node.fingerprint = get("client-fingerprint");
-    node.insecure = get("skip-cert-verify").map(|v| v == "true").unwrap_or(false);
+    node.insecure = get("skip-cert-verify")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     if let Some(key) = get("public-key") {
         node.tls = true;
         node.reality_key = Some(key);
@@ -1050,12 +1098,27 @@ pub fn bank_path() -> std::path::PathBuf {
     crate::config::state_dir().join("nodes.json")
 }
 
+/// Через сколько молчания нода выпадает из запаса. Отвечавшая в этот срок
+/// ещё может ожить; та, что молчит месяц, — уже вряд ли, а место занимает.
+pub const PRUNE_AFTER_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// Нода в запасе и когда она последний раз отвечала.
 #[derive(Debug, Clone)]
 pub struct Kept {
     pub node: Node,
     /// Отметка времени последнего успешного отклика, секунды эпохи.
     pub last_ok: Option<u64>,
+    /// Когда ноду впервые занесли в запас. Нужен, чтобы вычищать по сроку
+    /// даже те, что не отвечали ни разу.
+    pub first_seen: u64,
+}
+
+impl Kept {
+    /// Сколько нода молчит: от последнего отклика, а если его не было — от
+    /// момента, когда её впервые увидели.
+    fn silent_for(&self, now: u64) -> u64 {
+        now.saturating_sub(self.last_ok.unwrap_or(self.first_seen))
+    }
 }
 
 /// Ключ ноды: адрес с портом. Имя для этого не годится — провайдер
@@ -1081,12 +1144,20 @@ pub fn save_bank(entries: &[Kept]) -> Result<(), String> {
     let body: Vec<String> = entries.iter().map(|k| k.node.to_outbound()).collect();
     let seen: Vec<String> = entries
         .iter()
-        .filter_map(|k| k.last_ok.map(|t| format!("{}: {t}", json::escape(&place(&k.node)))))
+        .filter_map(|k| {
+            k.last_ok
+                .map(|t| format!("{}: {t}", json::escape(&place(&k.node))))
+        })
+        .collect();
+    let first: Vec<String> = entries
+        .iter()
+        .map(|k| format!("{}: {}", json::escape(&place(&k.node)), k.first_seen))
         .collect();
     let text = format!(
-        "{{\"outbounds\": [{}], \"seen\": {{{}}}}}",
+        "{{\"outbounds\": [{}], \"seen\": {{{}}}, \"first\": {{{}}}}}",
         body.join(", "),
-        seen.join(", ")
+        seen.join(", "),
+        first.join(", ")
     );
     std::fs::write(bank_path(), text).map_err(|e| format!("не записать запас нод: {e}"))
 }
@@ -1100,26 +1171,37 @@ pub fn load_bank() -> Vec<Kept> {
     let Ok(nodes) = parse(&text) else {
         return Vec::new();
     };
-    let seen = Json::parse(&text)
-        .ok()
-        .and_then(|j| j.get("seen").cloned());
+    let root = Json::parse(&text).ok();
+    let seen = root.as_ref().and_then(|j| j.get("seen").cloned());
+    let first = root.as_ref().and_then(|j| j.get("first").cloned());
+    let now = now_secs();
+    let stamp = |map: &Option<Json>, node: &Node| {
+        map.as_ref()
+            .and_then(|s| s.get(&place(node)))
+            .and_then(|v| match v {
+                crate::json::Json::Num(n) => Some(*n as u64),
+                _ => None,
+            })
+    };
     nodes
         .into_iter()
         .map(|node| {
-            let last_ok = seen
-                .as_ref()
-                .and_then(|s| s.get(&place(&node)))
-                .and_then(|v| match v {
-                    crate::json::Json::Num(n) => Some(*n as u64),
-                    _ => None,
-                });
-            Kept { node, last_ok }
+            let last_ok = stamp(&seen, &node);
+            // Файл со старой версии поля «first» не имел — берём отметку
+            // отклика, а её нет — считаем, что нода только что попала в запас.
+            let first_seen = stamp(&first, &node).or(last_ok).unwrap_or(now);
+            Kept {
+                node,
+                last_ok,
+                first_seen,
+            }
         })
         .collect()
 }
 
 /// Дописать в запас ноды, которых там ещё нет.
 pub fn add_missing(bank: &mut Vec<Kept>, extra: &[Node]) -> usize {
+    let now = now_secs();
     let mut added = 0;
     for node in extra {
         if bank.iter().any(|k| place(&k.node) == place(node)) {
@@ -1128,10 +1210,123 @@ pub fn add_missing(bank: &mut Vec<Kept>, extra: &[Node]) -> usize {
         bank.push(Kept {
             node: node.clone(),
             last_ok: None,
+            first_seen: now,
         });
         added += 1;
     }
     added
+}
+
+/// Итог сведе́ния свежих нод из подписок с прежним активным списком и запасом.
+#[derive(Debug, Default)]
+pub struct Reconciled {
+    /// Что кладём в конфиг движка: свежие + пережившие проверку + поднятые
+    /// из запаса.
+    pub active: Vec<Node>,
+    /// Обновлённый запас: всё виденное, минус вычищенное по сроку молчания.
+    pub bank: Vec<Kept>,
+    /// Ноды, которых в прошлом активном списке не было.
+    pub added: Vec<String>,
+    /// Поднятые из запаса обратно в работу.
+    pub revived: Vec<String>,
+    /// Подписка перестала их отдавать, но они ещё отвечают — оставлены в работе.
+    pub carried: Vec<String>,
+    /// Подписка перестала их отдавать и они молчат — ушли в запас.
+    pub parked: Vec<String>,
+    /// Вычищены из запаса по сроку молчания.
+    pub pruned: Vec<String>,
+}
+
+/// Свести свежий список нод из подписок с тем, что было в работе, и с запасом.
+///
+///   * свежая нода из подписки — всегда в работе;
+///   * нода, которую подписка больше не отдаёт: отвечает — остаётся в работе,
+///     молчит — уходит в запас;
+///   * нода из запаса, которой нет в подписке, но она снова отвечает и в
+///     работе её нет, — поднимается обратно;
+///   * из запаса вычищается всё, что молчит дольше [`PRUNE_AFTER_SECS`].
+///
+/// Отклик проверяется через [`responds`] с таймаутом `probe`. Функция сама
+/// никуда не пишет — только считает; запись остаётся на вызывающем.
+pub fn reconcile(
+    fresh: &[Node],
+    prev_active: &[Node],
+    mut bank: Vec<Kept>,
+    probe: std::time::Duration,
+) -> Reconciled {
+    let now = now_secs();
+    let fresh_places: Vec<String> = fresh.iter().map(place).collect();
+    let prev_places: Vec<String> = prev_active.iter().map(place).collect();
+
+    let mut active: Vec<Node> = fresh.to_vec();
+    let mut active_places: Vec<String> = fresh_places.clone();
+    let mut carried = Vec::new();
+    let mut parked = Vec::new();
+
+    // Ноды прежнего списка, которых подписка больше не отдаёт.
+    for node in prev_active {
+        let p = place(node);
+        if fresh_places.contains(&p) {
+            continue;
+        }
+        if responds(node, probe) {
+            carried.push(node.name.clone());
+            active.push(node.clone());
+            active_places.push(p);
+        } else {
+            parked.push(node.name.clone());
+        }
+    }
+
+    // В запас дописываем всё виденное: и свежее, и то, что было в работе.
+    add_missing(&mut bank, fresh);
+    add_missing(&mut bank, prev_active);
+
+    // Поднять из запаса живых, которых сейчас нет в работе.
+    let mut revived = Vec::new();
+    for kept in bank.iter_mut() {
+        let p = place(&kept.node);
+        if active_places.contains(&p) {
+            kept.last_ok = Some(now);
+            continue;
+        }
+        if responds(&kept.node, probe) {
+            kept.last_ok = Some(now);
+            revived.push(kept.node.name.clone());
+            active.push(kept.node.clone());
+            active_places.push(p);
+        }
+    }
+
+    // Вычистка запаса по сроку молчания. То, что сейчас в работе, не трогаем.
+    let mut pruned = Vec::new();
+    bank.retain(|kept| {
+        if active_places.contains(&place(&kept.node)) {
+            return true;
+        }
+        if kept.silent_for(now) > PRUNE_AFTER_SECS {
+            pruned.push(kept.node.name.clone());
+            return false;
+        }
+        true
+    });
+
+    // Что нового относительно прошлого активного списка.
+    let added: Vec<String> = active
+        .iter()
+        .filter(|n| !prev_places.contains(&place(n)))
+        .map(|n| n.name.clone())
+        .collect();
+
+    Reconciled {
+        active,
+        bank,
+        added,
+        revived,
+        carried,
+        parked,
+        pruned,
+    }
 }
 
 /// Выкинуть из запаса по имени или по адресу с портом. Возвращает выкинутые.
@@ -1190,6 +1385,20 @@ pub fn saved_url() -> Result<String, String> {
         .map_err(|_| "подписка ещё не загружена — net vpn sub <ссылка>".to_string())
 }
 
+/// Ноды из уже собранного конфига движка. Нужны как «что было в работе» для
+/// [`reconcile`]. Конфига нет или он битый — считаем, что в работе пусто.
+pub fn current_nodes() -> Vec<Node> {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|text| parse(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Путь журнала обновлений подписок.
+pub fn refresh_log_path() -> std::path::PathBuf {
+    crate::config::state_dir().join("sub.log")
+}
+
 /// Ноды из сохранённого списка. Полный разбор конфига для меню не нужен —
 /// движку он нужен целиком, а человеку только имена.
 pub fn load_nodes() -> Result<Vec<SavedNode>, String> {
@@ -1208,7 +1417,6 @@ pub struct SavedNode {
     pub name: String,
 }
 
-
 #[cfg(test)]
 mod bank_tests {
     use super::*;
@@ -1219,9 +1427,17 @@ mod bank_tests {
         n
     }
 
+    fn запись(node: Node) -> Kept {
+        Kept {
+            node,
+            last_ok: None,
+            first_seen: now_secs(),
+        }
+    }
+
     #[test]
     fn запас_узнаёт_ноду_по_адресу_а_не_по_имени() {
-        let mut bank = vec![Kept { node: нода("Старое имя", "a.example", 443), last_ok: None }];
+        let mut bank = vec![запись(нода("Старое имя", "a.example", 443))];
         // Та же машина под новым именем — дубля быть не должно.
         let added = add_missing(&mut bank, &[нода("Новое имя", "a.example", 443)]);
         assert_eq!(added, 0);
@@ -1234,13 +1450,67 @@ mod bank_tests {
     #[test]
     fn из_запаса_убирают_и_по_имени_и_по_адресу() {
         let mut bank = vec![
-            Kept { node: нода("Первая", "a.example", 443), last_ok: None },
-            Kept { node: нода("Вторая", "b.example", 443), last_ok: None },
+            запись(нода("Первая", "a.example", 443)),
+            запись(нода("Вторая", "b.example", 443)),
         ];
         assert_eq!(drop_from_bank(&mut bank, "Первая"), vec!["Первая"]);
         assert_eq!(drop_from_bank(&mut bank, "b.example:443"), vec!["Вторая"]);
         assert!(bank.is_empty());
         assert!(drop_from_bank(&mut bank, "чего нет").is_empty());
+    }
+
+    // Адреса вида *.example не резолвятся, поэтому в тестах любая нода
+    // считается молчащей — это и проверяем на путях parked/pruned/added.
+    const МИГ: std::time::Duration = std::time::Duration::from_millis(1);
+
+    #[test]
+    fn свежие_ноды_попадают_в_актив_и_в_новые() {
+        let fresh = vec![нода("A", "a.example", 443), нода("B", "b.example", 443)];
+        let r = reconcile(&fresh, &[], Vec::new(), МИГ);
+        assert_eq!(r.active.len(), 2);
+        assert_eq!(r.added.len(), 2);
+        assert_eq!(r.bank.len(), 2);
+    }
+
+    #[test]
+    fn выпавшая_из_подписки_молчащая_уходит_в_запас() {
+        let prev = vec![нода("Старая", "old.example", 443)];
+        let fresh = vec![нода("Новая", "new.example", 443)];
+        let r = reconcile(&fresh, &prev, Vec::new(), МИГ);
+        assert!(r.active.iter().all(|n| n.name != "Старая"));
+        assert_eq!(r.parked, vec!["Старая"]);
+        assert!(r.carried.is_empty());
+    }
+
+    #[test]
+    fn давно_молчащая_нода_вычищается_из_запаса() {
+        let труп = Kept {
+            node: нода("Труп", "dead.example", 443),
+            last_ok: Some(now_secs().saturating_sub(PRUNE_AFTER_SECS + 100)),
+            first_seen: now_secs().saturating_sub(PRUNE_AFTER_SECS + 200),
+        };
+        let свежая = Kept {
+            node: нода("Свежий", "fresh.example", 443),
+            last_ok: Some(now_secs()),
+            first_seen: now_secs(),
+        };
+        let r = reconcile(&[], &[], vec![труп, свежая], МИГ);
+        assert_eq!(r.pruned, vec!["Труп"]);
+        assert!(r.bank.iter().any(|k| k.node.name == "Свежий"));
+        assert_eq!(r.bank.len(), 1);
+    }
+
+    #[test]
+    fn нода_в_подписке_защищена_от_вычистки() {
+        let древняя = Kept {
+            node: нода("Древний", "x.example", 443),
+            last_ok: Some(0),
+            first_seen: 0,
+        };
+        let fresh = vec![нода("Древний", "x.example", 443)];
+        let r = reconcile(&fresh, &[], vec![древняя], МИГ);
+        assert!(r.pruned.is_empty());
+        assert!(r.bank.iter().any(|k| k.node.name == "Древний"));
     }
 }
 

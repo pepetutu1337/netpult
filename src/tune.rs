@@ -35,7 +35,11 @@ impl Score {
             (true, false, false) => 1000.0,
             _ => 0.0,
         };
-        if tier > 0.0 { tier + self.speed } else { self.speed / 10.0 }
+        if tier > 0.0 {
+            tier + self.speed
+        } else {
+            self.speed / 10.0
+        }
     }
 
     /// Годится без оговорок: и страница, и видео, и браузерное приветствие.
@@ -56,7 +60,10 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { full: false, verbose: true }
+        Options {
+            full: false,
+            verbose: true,
+        }
     }
 }
 
@@ -101,7 +108,12 @@ fn measure(z: &Zapret, name: &str, phase: &mut dyn FnMut(&str)) -> Result<Score,
         }
     }
 
-    Ok(Score { strategy: name.to_string(), reachable, video, speed })
+    Ok(Score {
+        strategy: name.to_string(),
+        reachable,
+        video,
+        speed,
+    })
 }
 
 /// Подбирает рабочую стратегию и оставляет лучшую из проверенных.
@@ -120,9 +132,10 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
     // Текущая идёт первой: чаще всего менять ничего и не нужно.
     let mut order: Vec<String> = Vec::new();
     if let Some(now) = &current
-        && all.contains(now) {
-            order.push(now.clone());
-        }
+        && all.contains(now)
+    {
+        order.push(now.clone());
+    }
     order.extend(all.into_iter().filter(|s| Some(s) != current.as_ref()));
 
     let mut results: Vec<Score> = Vec::new();
@@ -158,7 +171,9 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
         results.push(score);
         if good && !options.full {
             if options.verbose {
-                ход.line(&format!("{DIM}  хватит: стратегия рабочая и быстрая{RESET}"));
+                ход.line(&format!(
+                    "{DIM}  хватит: стратегия рабочая и быстрая{RESET}"
+                ));
             }
             break;
         }
@@ -198,9 +213,7 @@ pub fn run(cfg: &Config, options: &Options) -> Result<Score, String> {
                 "{YELLOW}  Ни одна стратегия не открыла YouTube. Оставляю лучшую по скорости.{RESET}"
             );
         } else if chosen.video.console_only() {
-            println!(
-                "{YELLOW}  Ни одна стратегия не прошла браузерным приветствием TLS.{RESET}"
-            );
+            println!("{YELLOW}  Ни одна стратегия не прошла браузерным приветствием TLS.{RESET}");
             println!(
                 "{DIM}  Консоль и качалки работать будут, браузер — нет. Лечится не тут, а\n  на стороне обхода: нужна стратегия, переживающая приветствие в два\n  килобайта (помогает fooling=badseq).{RESET}"
             );

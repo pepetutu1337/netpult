@@ -66,7 +66,11 @@ impl<'a> Vpn<'a> {
                 .map(|s| s.success())
                 .unwrap_or(false)
         };
-        if ok { Ok(()) } else { Err("клиент не запущен".into()) }
+        if ok {
+            Ok(())
+        } else {
+            Err("клиент не запущен".into())
+        }
     }
 }
 

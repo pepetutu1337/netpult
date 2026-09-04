@@ -201,7 +201,8 @@ fn find_exe(names: &[String], deeper: &[&str]) -> Option<Found> {
 
 /// Похожа ли папка на установленный zapret.
 fn looks_like_zapret(dir: &Path) -> bool {
-    dir.join("conf.env").is_file() && (dir.join("nfqws").is_file() || dir.join("service.sh").is_file())
+    dir.join("conf.env").is_file()
+        && (dir.join("nfqws").is_file() || dir.join("service.sh").is_file())
 }
 
 /// Ищет установленный zapret где угодно, а не только там, куда его кладёт
@@ -293,7 +294,9 @@ fn service_dir() -> Option<PathBuf> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().find(|l| l.trim_start().starts_with("ExecStart="))?;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("ExecStart="))?;
     let path = line.split('=').nth(1)?.split_whitespace().next()?;
     Path::new(path).parent().map(Path::to_path_buf)
 }
@@ -359,10 +362,7 @@ pub fn find(kind: Kind, cfg: &Config) -> Option<Found> {
         } else {
             "уже был в системе"
         };
-        return Some(Found {
-            path,
-            source,
-        });
+        return Some(Found { path, source });
     }
     match kind {
         Kind::Zapret => find_zapret(),
@@ -404,7 +404,8 @@ fn release_urls(url: &str) -> Vec<String> {
 /// Качает первый отозвавшийся источник. Возвращает ссылку, которая сработала.
 pub fn download(urls: &[String], target: &Path, min_bytes: u64) -> Result<String, String> {
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("не создать {}: {e}", parent.display()))?;
     }
     let temp = target.with_extension("part");
     let mut trouble = String::new();
@@ -468,7 +469,9 @@ fn env_override(kind: Kind) -> Option<PathBuf> {
         Kind::Tglock => "NETPULT_TGLOCK",
         Kind::Core => "NETPULT_CORE",
     };
-    std::env::var_os(key).map(PathBuf::from).filter(|p| p.exists())
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
 }
 
 // ── установка ───────────────────────────────────────────────────────────────
@@ -510,7 +513,8 @@ fn tglock_depot_file() -> &'static str {
 fn install_tglock(local: Option<&Path>) -> Result<PathBuf, String> {
     let target = install_dir().join(exe("tglock-cli"));
     if let Some(file) = local {
-        std::fs::copy(file, &target).map_err(|e| format!("не скопировать {}: {e}", file.display()))?;
+        std::fs::copy(file, &target)
+            .map_err(|e| format!("не скопировать {}: {e}", file.display()))?;
         make_runnable(&target);
         return Ok(target);
     }
@@ -542,7 +546,8 @@ fn install_tglock(local: Option<&Path>) -> Result<PathBuf, String> {
 fn install_core(local: Option<&Path>) -> Result<PathBuf, String> {
     if let Some(file) = local {
         let target = config::state_dir().join(exe("sing-box"));
-        std::fs::copy(file, &target).map_err(|e| format!("не скопировать {}: {e}", file.display()))?;
+        std::fs::copy(file, &target)
+            .map_err(|e| format!("не скопировать {}: {e}", file.display()))?;
         make_runnable(&target);
         return Ok(target);
     }
@@ -591,7 +596,12 @@ fn install_zapret(local: Option<&Path>) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&unpack);
     std::fs::create_dir_all(&unpack).map_err(|e| e.to_string())?;
     let ok = Command::new("tar")
-        .args(["-xzf", &archive.to_string_lossy(), "-C", &unpack.to_string_lossy()])
+        .args([
+            "-xzf",
+            &archive.to_string_lossy(),
+            "-C",
+            &unpack.to_string_lossy(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -624,7 +634,11 @@ fn install_zapret(local: Option<&Path>) -> Result<PathBuf, String> {
         .map_err(|e| format!("не запустился service.sh: {e}"))?;
     if !dir.join("nfqws").is_file() {
         let tail = String::from_utf8_lossy(&out.stderr);
-        let last = tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let last = tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         return Err(format!(
             "порт zapret скачан в {}, но nfqws не пришёл: {last}\n\
              Так и должно быть, если сеть закрывает файлы релизов GitHub по IP.\n\
@@ -651,9 +665,13 @@ pub fn remember(kind: Kind, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(&file).unwrap_or_default();
     let mut lines: Vec<String> = text
         .lines()
-        .filter(|l| !l.trim_start().starts_with(&format!("{key} ")) && !l.trim_start().starts_with(&format!("{key}=")))
+        .filter(|l| {
+            !l.trim_start().starts_with(&format!("{key} "))
+                && !l.trim_start().starts_with(&format!("{key}="))
+        })
         .map(str::to_string)
         .collect();
     lines.push(format!("{key} = {}", path.display()));
-    std::fs::write(&file, lines.join("\n") + "\n").map_err(|e| format!("не записать настройки: {e}"))
+    std::fs::write(&file, lines.join("\n") + "\n")
+        .map_err(|e| format!("не записать настройки: {e}"))
 }

@@ -8,7 +8,7 @@
 //!
 //! Каждый шаг пишется в журнал, чтобы потом было видно, что происходило ночью.
 
-use crate::config::{state_dir, Config};
+use crate::config::{Config, state_dir};
 use crate::probe;
 use crate::profile;
 use crate::split;
@@ -98,9 +98,9 @@ pub fn note(text: &str) {
             .create(true)
             .append(true)
             .open(log_path())
-        {
-            file.write_all(line.as_bytes()).ok();
-        }
+    {
+        file.write_all(line.as_bytes()).ok();
+    }
 }
 
 /// Показывает всплывающее уведомление на рабочем столе, если есть чем.
@@ -191,7 +191,9 @@ fn tunnel_tick() -> bool {
     let было = crate::singbox::active_node()
         .map(|(n, _)| n)
         .unwrap_or_else(|| "?".into());
-    note(&format!("через ноду «{было}» сайты не открываются — ищу живую"));
+    note(&format!(
+        "через ноду «{было}» сайты не открываются — ищу живую"
+    ));
 
     // Пусть движок сам перемерит группу и переставит автоподбор на живую.
     crate::singbox::measure_group(crate::singbox::AUTO, 5000);
@@ -204,7 +206,9 @@ fn tunnel_tick() -> bool {
         let стало = crate::singbox::active_node()
             .map(|(n, _)| n)
             .unwrap_or_else(|| "?".into());
-        alert(&format!("нода «{было}» перестала пропускать трафик — перешёл на «{стало}»"));
+        alert(&format!(
+            "нода «{было}» перестала пропускать трафик — перешёл на «{стало}»"
+        ));
     } else {
         alert("ни одна нода не пропускает трафик — проверь подписку: net vpn nodes");
     }
@@ -243,6 +247,7 @@ fn tune_allowed() -> bool {
 pub fn tick(cfg: &Config) -> bool {
     maybe_update_geoblock();
     maybe_update_telegram_cidr(cfg);
+    maybe_refresh_subscriptions();
     let mut acted = follow_network(cfg);
     let z = Zapret::new(cfg);
     let tg = Telegram::new(cfg);
@@ -319,11 +324,21 @@ pub fn tick(cfg: &Config) -> bool {
     note("не помогло — подбираю стратегию");
     std::fs::create_dir_all(state_dir()).ok();
     std::fs::write(tune_stamp(), "").ok();
-    match tune::run(cfg, &tune::Options { full: false, verbose: false }) {
+    match tune::run(
+        cfg,
+        &tune::Options {
+            full: false,
+            verbose: false,
+        },
+    ) {
         Ok(best) => alert(&format!(
             "стратегия сменена на {} ({}, {:.0} КБ/с)",
             best.strategy,
-            if best.reachable { "открывается" } else { "всё ещё нет" },
+            if best.reachable {
+                "открывается"
+            } else {
+                "всё ещё нет"
+            },
             best.speed
         )),
         Err(e) => alert(&format!("обход упал, подбор не удался: {e}")),
@@ -352,14 +367,18 @@ fn maybe_update_telegram_cidr(cfg: &Config) {
     match crate::singbox::update_telegram_cidr() {
         Ok(_) if crate::singbox::telegram_cidr() == было => {}
         Ok(сколько) => {
-            note(&format!("адреса Telegram изменились: {сколько} сетей, пересобираю маршруты"));
+            note(&format!(
+                "адреса Telegram изменились: {сколько} сетей, пересобираю маршруты"
+            ));
             if crate::singbox::rewrite_scope(crate::singbox::Scope::TelegramOnly).is_ok() {
                 let core = crate::singbox::Core::new(cfg);
                 if core.state() == crate::singbox::State::Up {
                     core.stop().ok();
                     match core.start() {
                         Ok(()) => note("туннель поднят с новым списком адресов"),
-                        Err(e) => alert(&format!("туннель не поднялся после обновления адресов: {e}")),
+                        Err(e) => alert(&format!(
+                            "туннель не поднялся после обновления адресов: {e}"
+                        )),
                     }
                 }
             }
@@ -369,6 +388,41 @@ fn maybe_update_telegram_cidr(cfg: &Config) {
 }
 
 /// Раз в сутки обновляет автосписок геоблока (если сплит вообще используется).
+/// Раз в сутки перечитывает подписки: провайдер добавляет и убирает ноды из
+/// выгрузки, а выпавшие живые надо успеть перенести в запас, пока они ещё
+/// отвечают. На роутере это делает отдельный крон (`netpult vpn sync`); тут —
+/// клиентская сторона, свой конфиг.
+fn maybe_refresh_subscriptions() {
+    if crate::subs::Store::load().active().next().is_none() {
+        return;
+    }
+    let marker = state_dir().join("subs.refreshed");
+    let day = 24 * 60 * 60;
+    let fresh = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e.as_secs() < day).unwrap_or(false))
+        .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    match crate::subs::refresh(Duration::from_secs(3)) {
+        Ok(r) => {
+            let c = &r.rec;
+            note(&format!(
+                "подписки перечитаны: актив {}, +{} новых, ~{} перенесено, ↺{} из запаса, ⚰{} в запас, ✂{} вычищено",
+                c.active.len(),
+                c.added.len(),
+                c.carried.len(),
+                c.revived.len(),
+                c.parked.len(),
+                c.pruned.len()
+            ));
+            std::fs::write(&marker, "").ok();
+        }
+        Err(e) => note(&format!("подписки не перечитались: {e}")),
+    }
+}
+
 fn maybe_update_geoblock() {
     let marker = state_dir().join("geoblock.updated");
     let day = 24 * 60 * 60;
@@ -453,9 +507,7 @@ pub fn status() -> String {
         .args(["--user", "is-active", "netpult-watch.service"])
         .output();
     match out {
-        Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "active" => {
-            "сторож: работает".into()
-        }
+        Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "active" => "сторож: работает".into(),
         _ => "сторож: не запущен".into(),
     }
 }

@@ -65,9 +65,7 @@ const СТРАТЕГИЯ: &str = "netpult-telegram-calls.bat";
 
 fn стратегия_со_звонками(cfg: &Config) -> bool {
     Zapret::new(cfg).state() == zapret::State::On
-        && Zapret::new(cfg)
-            .strategy()
-            .is_some_and(|s| s == СТРАТЕГИЯ)
+        && Zapret::new(cfg).strategy().is_some_and(|s| s == СТРАТЕГИЯ)
 }
 
 /// Включить звонки. `dpi` — не трогать ноду, чинить дурением DPI.
@@ -110,7 +108,9 @@ fn через_ноду(cfg: &Config) -> Result<Vec<String>, String> {
     // Диапазоны Telegram меняются, а голос идёт по адресам, минуя имена:
     // устаревший список — это часть разговоров мимо ноды.
     match singbox::update_telegram_cidr() {
-        Ok(сколько) => шаги.push(format!("список адресов Telegram обновлён: {сколько} сетей")),
+        Ok(сколько) => {
+            шаги.push(format!("список адресов Telegram обновлён: {сколько} сетей"))
+        }
         Err(_) => шаги.push("список адресов Telegram не обновился, беру прежний".into()),
     }
 
@@ -140,14 +140,17 @@ fn через_ноду(cfg: &Config) -> Result<Vec<String>, String> {
 
 fn через_zapret(cfg: &Config) -> Result<Vec<String>, String> {
     let z = Zapret::new(cfg);
-    let dir = z.dir().ok_or("zapret не найден: net deps install zapret")?.clone();
+    let dir = z
+        .dir()
+        .ok_or("zapret не найден: net deps install zapret")?
+        .clone();
     let база = z
         .strategy()
         .filter(|s| s != СТРАТЕГИЯ)
         .ok_or("не понять, от какой стратегии отталкиваться: net strat")?;
 
-    let исходник = найти_стратегию(&dir, &база)
-        .ok_or_else(|| format!("не нашёлся файл стратегии {база}"))?;
+    let исходник =
+        найти_стратегию(&dir, &база).ok_or_else(|| format!("не нашёлся файл стратегии {база}"))?;
     let текст = std::fs::read_to_string(&исходник).map_err(|e| e.to_string())?;
     let собрано = добавить_голос(&текст);
 
@@ -189,7 +192,8 @@ fn найти_стратегию(dir: &std::path::Path, name: &str) -> Option<Pa
 /// будет стоять, а трогать ему будет нечего.
 pub fn добавить_голос(текст: &str) -> String {
     const ПОРТЫ: &str = "590-1400,3478,3479";
-    const БЛОК: &str = "--filter-udp=590-1400,3478 --filter-l7=stun --dpi-desync=fake --dpi-desync-repeats=6";
+    const БЛОК: &str =
+        "--filter-udp=590-1400,3478 --filter-l7=stun --dpi-desync=fake --dpi-desync-repeats=6";
 
     // Второй проход по уже собранной стратегии не должен плодить блоки.
     if текст.contains(БЛОК) {
@@ -278,8 +282,12 @@ mod tests {
     fn блок_голоса_идёт_раньше_широких_фильтров() {
         let текст = "--wf-udp=443 ^\n--filter-udp=443 --dpi-desync=fake --new ^\n";
         let вышло = добавить_голос(текст);
-        let голос = вышло.find("--filter-l7=stun").expect("блок голоса на месте");
-        let широкий = вышло.find("--filter-udp=443 ").expect("прежний блок на месте");
+        let голос = вышло
+            .find("--filter-l7=stun")
+            .expect("блок голоса на месте");
+        let широкий = вышло
+            .find("--filter-udp=443 ")
+            .expect("прежний блок на месте");
         assert!(голос < широкий);
     }
 

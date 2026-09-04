@@ -61,7 +61,10 @@ fn rule_sets(scope: Scope) -> String {
     if scope == Scope::TelegramOnly {
         // Готового набора адресов Telegram у SagerNet нет — только домены.
         // Адреса берём официальным списком, он лежит рядом (см. telegram_cidr).
-        sets.push(set_entry("geosite-telegram", "sing-geosite@rule-set/geosite-telegram"));
+        sets.push(set_entry(
+            "geosite-telegram",
+            "sing-geosite@rule-set/geosite-telegram",
+        ));
     }
     sets.join(",\n      ")
 }

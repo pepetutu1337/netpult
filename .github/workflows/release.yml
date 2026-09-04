@@ -36,6 +36,9 @@ jobs:
           - os: ubuntu-latest
             name: linux-x86_64
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            name: linux-aarch64
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             name: macos-universal
             target: universal-apple-darwin
@@ -51,12 +54,23 @@ jobs:
 
       # musl даёт статический бинарь: одна сборка идёт и на Ubuntu, и на
       # SteamOS, и на Alpine — без привязки к версии glibc машины сборки.
-      - name: Тулчейн Linux
+      - name: Тулчейн Linux x86_64
         if: matrix.name == 'linux-x86_64'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
+
+      # aarch64 для роутера (OpenWrt на MediaTek Filogic / MT7981). Линкуем
+      # gnu-кросс-gcc: у netpult нет C-зависимостей, а musl-таргет статичен
+      # сам по себе, так что этого достаточно.
+      - name: Тулчейн Linux aarch64
+        if: matrix.name == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-musl
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Тулчейн macOS
         if: matrix.name == 'macos-universal'

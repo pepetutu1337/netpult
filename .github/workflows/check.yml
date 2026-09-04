@@ -37,6 +37,16 @@ jobs:
         run: cargo test --locked
       - name: Придирки
         run: cargo clippy --all-targets -- -D warnings
+      - name: Сборка под роутер (aarch64 musl)
+        # Бинарь для роутера собирается только в релизе; тут проверяем, что
+        # платформенный код под aarch64/musl хотя бы компилируется.
+        if: matrix.name == 'linux'
+        run: |
+          set -eux
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-musl
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+          cargo build --release --locked --target aarch64-unknown-linux-musl
       - name: Пульт запускается и отвечает
         # Дымовая проверка: бинарь стартует на этой системе и не падает на
         # разборе аргументов. Сеть тут не трогаем — на раннере её всё равно

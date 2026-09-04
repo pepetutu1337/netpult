@@ -42,31 +42,31 @@ fn tag_of(outbound: &Json) -> Option<String> {
     outbound.get("tag").and_then(|t| t.as_str())
 }
 
-/// Адрес и порт ноды — по ним узнаём одну и ту же ноду под разными именами.
-fn place_of(outbound: &Json) -> Option<(String, i64)> {
-    let server = outbound.get("server")?.as_str()?;
-    let port = match outbound.get("server_port")? {
-        Json::Num(n) => *n as i64,
-        _ => return None,
-    };
-    Some((server, port))
+/// Один ли и тот же набор нод (порядок неважен, все поля важны).
+fn same_nodes(a: &[Node], b: &[Node]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a: Vec<&Node> = a.iter().collect();
+    let mut b: Vec<&Node> = b.iter().collect();
+    let key = |n: &&Node| (n.server.clone(), n.port);
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    a == b
 }
 
-/// Собрать новый конфиг: чужая обвязка + свежие ноды.
+/// Собрать новый конфиг: чужая обвязка + готовый список нод.
 ///
-/// Возвращает текст конфига и число нод. Ничего не пишет и никуда не ходит —
-/// чистое преобразование, потому и проверяется тестами.
-/// Возвращает текст конфига, сколько всего нод вышло и сколько из них
-/// перенесено из прежнего.
+/// `nodes` — уже сведённый активный список (см. [`sub::reconcile`]): что
+/// подписка отдала, что перенесли живым, что подняли из запаса. Здесь только
+/// подстановка: все прежние ноды-outbound'ы заменяются на `nodes`, обвязка
+/// (`direct`, `route`, `inbounds`, селекторы) остаётся на своих местах,
+/// списки выбора и `default` переписываются на новые имена.
 ///
-/// `keep` — теги нод прежнего конфига, которые надо сохранить.
-pub fn merge(
-    existing: &str,
-    nodes: &[Node],
-    keep: &[String],
-) -> Result<(String, usize, usize), String> {
+/// Возвращает текст конфига и число нод. Ничего не пишет и никуда не ходит.
+pub fn merge(existing: &str, nodes: &[Node]) -> Result<(String, usize), String> {
     if nodes.is_empty() {
-        return Err("подписка не дала ни одной ноды — обновлять нечем".into());
+        return Err("список нод пуст — обновлять нечем".into());
     }
     let mut config = Json::parse(existing).map_err(|e| format!("конфиг не разобрать: {e}"))?;
     let old = match config.get("outbounds") {
@@ -74,8 +74,6 @@ pub fn merge(
         _ => return Err("в конфиге нет списка outbounds".into()),
     };
 
-    // Свежие ноды — на место прежних, обвязка остаётся на своих местах и в
-    // прежнем порядке.
     let mut fresh: Vec<Json> = Vec::new();
     for node in nodes {
         let parsed = Json::parse(&node.to_outbound())
@@ -84,32 +82,13 @@ pub fn merge(
     }
     let new_tags: Vec<String> = fresh.iter().filter_map(tag_of).collect();
 
-    // Прежние ноды — следом за свежими. Отсеиваем только те, что подписка и
-    // так вернула: сравниваем по адресу с портом, потому что имя у одной и
-    // той же ноды может смениться, а повторять её в списке дважды ни к чему.
-    //
-    // Отпавшие не выбрасываем намеренно. Нода молчит сегодня и отвечает
-    // завтра — провайдеры их поднимают обратно, а `urltest` мёртвую всё равно
-    // не выберет, так что висеть она никому не мешает.
-    let fresh_places: Vec<(String, i64)> = fresh.iter().filter_map(place_of).collect();
-    let kept: Vec<Json> = old
-        .iter()
-        .filter(|o| is_node(o))
-        .filter(|o| tag_of(o).is_some_and(|t| keep.contains(&t)))
-        .filter(|o| tag_of(o).is_some_and(|t| !new_tags.contains(&t)))
-        .filter(|o| place_of(o).is_none_or(|p| !fresh_places.contains(&p)))
-        .cloned()
-        .collect();
-    let kept_tags: Vec<String> = kept.iter().filter_map(tag_of).collect();
-
+    // Ноды кладём одной пачкой на место первой прежней, обвязку — как была.
     let mut out: Vec<Json> = Vec::new();
     let mut put_nodes = false;
     for item in &old {
         if is_node(item) {
-            // Ноды кладём одной пачкой на место первой прежней.
             if !put_nodes {
                 out.extend(fresh.iter().cloned());
-                out.extend(kept.iter().cloned());
                 put_nodes = true;
             }
             continue;
@@ -118,14 +97,20 @@ pub fn merge(
     }
     if !put_nodes {
         out.extend(fresh.iter().cloned());
-        out.extend(kept.iter().cloned());
     }
 
     // Списки выбора: подставляем новые имена, а всё, что не было нодой
     // (`direct`, вложенный `auto`), оставляем на месте.
-    let old_tags: Vec<String> = old.iter().filter(|o| is_node(o)).filter_map(tag_of).collect();
+    let old_tags: Vec<String> = old
+        .iter()
+        .filter(|o| is_node(o))
+        .filter_map(tag_of)
+        .collect();
     for item in out.iter_mut() {
-        let kind = item.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+        let kind = item
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
         if kind != "selector" && kind != "urltest" {
             continue;
         }
@@ -134,25 +119,16 @@ pub fn merge(
         };
         let survivors: Vec<Json> = list
             .iter()
-            .filter(|entry| {
-                entry
-                    .as_str()
-                    .is_some_and(|name| !old_tags.contains(&name))
-            })
+            .filter(|entry| entry.as_str().is_some_and(|name| !old_tags.contains(&name)))
             .cloned()
             .collect();
-        let mut updated: Vec<Json> = new_tags
-            .iter()
-            .chain(kept_tags.iter())
-            .map(|t| Json::Str(t.clone()))
-            .collect();
+        let mut updated: Vec<Json> = new_tags.iter().map(|t| Json::Str(t.clone())).collect();
         updated.extend(survivors);
         item.set("outbounds", Json::Arr(updated));
 
         // Умолчание могло указывать на ноду, которой больше нет.
         if let Some(default) = item.get("default").and_then(|d| d.as_str())
             && !new_tags.contains(&default)
-            && !kept_tags.contains(&default)
             && !matches!(item.get("outbounds"), Some(Json::Arr(l)) if l.iter().any(|e| e.as_str().as_deref() == Some(default.as_str())))
         {
             item.set("default", Json::Str(new_tags[0].clone()));
@@ -160,7 +136,7 @@ pub fn merge(
     }
 
     config.set("outbounds", Json::Arr(out));
-    Ok((config.to_text(), nodes.len() + kept.len(), kept.len()))
+    Ok((config.to_text(), nodes.len()))
 }
 
 /// Куда и чем обновлять.
@@ -173,8 +149,10 @@ pub struct Plan {
     pub restart: Vec<String>,
     /// Через что проверить, что связь жива: адрес прокси ядра.
     pub probe_proxy: String,
-    /// Оставлять ли в конфиге прежние ноды. Молчащие тоже остаются: они
-    /// оживают, а `urltest` мёртвую не выберет.
+    /// Сводить ли свежие ноды с прежними и запасом (см. [`sub::reconcile`]):
+    /// выпавшие из подписки пробуются, живые остаются, молчащие уходят в
+    /// запас, из запаса живые поднимаются. `false` — только то, что отдала
+    /// подписка сейчас.
     pub keep_alive: bool,
     /// Только собрать и проверить рядом, ничего не заменяя. Нужен, чтобы
     /// убедиться в правке до того, как она коснётся живого роутера.
@@ -196,10 +174,14 @@ impl Default for Plan {
 
 /// Итог обновления — то, что уходит в журнал и на экран.
 pub struct Report {
-    /// Всего нод в новом конфиге: свежие плюс перенесённые живые.
+    /// Всего нод в новом конфиге.
     pub nodes: usize,
-    /// Сколько прежних нод пережило обновление.
-    pub kept: usize,
+    /// Из них перенесено живыми, хотя подписка их больше не отдаёт.
+    pub carried: usize,
+    /// Из них поднято обратно из запаса.
+    pub revived: usize,
+    /// Ушло в запас как молчащие.
+    pub parked: usize,
     pub backup: PathBuf,
     pub rolled_back: bool,
     pub note: String,
@@ -211,19 +193,67 @@ pub struct Report {
 /// наружу, — и без отметок непонятно, на чём оно стоит: на медленной сети
 /// или на упавшем ядре.
 pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
-    let url = sub::saved_url()?;
-    phase("забираю подписку");
-    let nodes = sub::fetch(&url, Duration::from_secs(45))?;
+    phase("забираю подписки");
+    let (fresh, fetched, store) = crate::subs::fetch_all();
+    if fetched.is_empty() {
+        return Err("нет активных подписок — net vpn subs add <ссылка>".into());
+    }
+
     phase("собираю конфиг");
     let existing = std::fs::read_to_string(&plan.config)
         .map_err(|e| format!("не прочитать {}: {e}", plan.config.display()))?;
-    let previous = if plan.keep_alive { previous_tags(&existing) } else { Vec::new() };
-    let (merged, count, kept) = merge(&existing, &nodes, &previous)?;
+
+    // «Что было в работе» берём из самого чужого конфига: его ноды-outbound'ы
+    // тем же разбором, что и подписку.
+    let prev_active = if plan.keep_alive {
+        sub::parse(&existing).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let bank = if plan.keep_alive {
+        sub::load_bank()
+    } else {
+        Vec::new()
+    };
+    let rec = sub::reconcile(&fresh, &prev_active, bank, Duration::from_secs(3));
+    if rec.active.is_empty() {
+        // Ни свежих, ни живых прежних, ни поднятых из запаса. Чужой конфиг не
+        // трогаем — вчерашние ноды лучше пустого, — но счётчики подписок уже
+        // посчитаны, сохраняем их и пишем в журнал.
+        let _ = store.save();
+        let _ = crate::subs::write_log(&rec, &fetched, true);
+        return Err(
+            "ни одной живой ноды: ни в подписках, ни в запасе — конфиг оставлен прежним".into(),
+        );
+    }
+    // Набор нод не изменился — конфиг не трогаем и ядро не перезапускаем
+    // (иначе суточный крон роняет связь каждый день на ровном месте).
+    // Сравниваем сами ноды со всеми полями: сменил провайдер ключи на том же
+    // адресе — это изменение, перетряхнуть надо. Обвязку не сравниваем: её
+    // sync и так не меняет. Состояние подписок и запаса закрепляем всегда.
+    if same_nodes(&prev_active, &rec.active) {
+        persist(&rec, &store, &fetched);
+        return Ok(Report {
+            nodes: rec.active.len(),
+            carried: rec.carried.len(),
+            revived: rec.revived.len(),
+            parked: rec.parked.len(),
+            backup: plan.config.clone(),
+            rolled_back: false,
+            note: "ноды не менялись".into(),
+        });
+    }
+
+    let (merged, count) = merge(&existing, &rec.active)?;
+    let carried = rec.carried.len();
+    let revived = rec.revived.len();
+    let parked = rec.parked.len();
 
     // Проверяем рядом, а не на месте: битый конфиг не должен даже на секунду
     // оказаться тем, с чем ядро попробует подняться.
     let candidate = plan.config.with_extension("json.new");
-    std::fs::write(&candidate, &merged).map_err(|e| format!("не записать проверяемый конфиг: {e}"))?;
+    std::fs::write(&candidate, &merged)
+        .map_err(|e| format!("не записать проверяемый конфиг: {e}"))?;
     phase("проверяю конфиг ядром");
     if let Err(e) = check(&plan.binary, &candidate) {
         let _ = std::fs::remove_file(&candidate);
@@ -232,12 +262,19 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
     if plan.dry_run {
         return Ok(Report {
             nodes: count,
-            kept,
+            carried,
+            revived,
+            parked,
             backup: candidate,
             rolled_back: false,
             note: "холостой прогон: конфиг собран и проверен, ничего не заменено".into(),
         });
     }
+
+    // Проверка прошла — состояние подписок и запаса можно закреплять: свежий
+    // конфиг ниже либо встанет, либо откатится, но счётчики провалов, отставка
+    // и живость нод от этого не меняются.
+    persist(&rec, &store, &fetched);
 
     let backup = backup_path(&plan.config);
     std::fs::copy(&plan.config, &backup).map_err(|e| format!("не сделать бэкап: {e}"))?;
@@ -250,7 +287,9 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
         stamp_success();
         return Ok(Report {
             nodes: count,
-            kept,
+            carried,
+            revived,
+            parked,
             backup,
             rolled_back: false,
             note: "ноды обновлены".into(),
@@ -264,11 +303,30 @@ pub fn run(plan: &Plan, phase: &mut dyn FnMut(&str)) -> Result<Report, String> {
     restart(&plan.restart)?;
     Ok(Report {
         nodes: count,
-        kept,
+        carried,
+        revived,
+        parked,
         backup,
         rolled_back: true,
         note: "после обновления связи не было — вернул прежний конфиг".into(),
     })
+}
+
+/// Записать на диск то, что насчитал [`sub::reconcile`]: запас с обновлёнными
+/// отметками отклика и состояние подписок; строку в журнал обновлений.
+fn persist(rec: &sub::Reconciled, store: &crate::subs::Store, fetched: &[crate::subs::Fetched]) {
+    let mut bank = rec.bank.clone();
+    sub::add_missing(&mut bank, &rec.active);
+    let live: Vec<String> = rec.active.iter().map(sub::place).collect();
+    let now = sub::now_secs();
+    for kept in bank.iter_mut() {
+        if live.contains(&sub::place(&kept.node)) {
+            kept.last_ok = Some(now);
+        }
+    }
+    let _ = sub::save_bank(&bank);
+    let _ = store.save();
+    let _ = crate::subs::write_log(rec, fetched, false);
 }
 
 /// Отметка последнего удачного обновления нод.
@@ -300,26 +358,6 @@ pub fn days_since_sync() -> Option<u64> {
         .ok()?
         .as_secs();
     Some(now.saturating_sub(then) / 86_400)
-}
-
-/// Теги всех нод, которые уже есть в конфиге.
-///
-/// Живость нарочно не проверяется. Раньше тут был прозвон через clash API, и
-/// молчащие ноды отбрасывались — но нода, молчащая сегодня, назавтра обычно
-/// оживает, а прозвон двух десятков нод занимал больше минуты на каждом
-/// запуске.
-fn previous_tags(existing: &str) -> Vec<String> {
-    let Ok(config) = Json::parse(existing) else {
-        return Vec::new();
-    };
-    let Some(Json::Arr(items)) = config.get("outbounds") else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter(|o| is_node(o))
-        .filter_map(tag_of)
-        .collect()
 }
 
 fn check(binary: &Path, config: &Path) -> Result<(), String> {
@@ -359,7 +397,17 @@ fn restart(command: &[String]) -> Result<(), String> {
 fn alive(proxy: &str) -> bool {
     for _ in 0..3 {
         let out = Command::new("curl")
-            .args(["-s", "-o", "/dev/null", "-x", proxy, "--max-time", "10", "-w", "%{http_code}"])
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-x",
+                proxy,
+                "--max-time",
+                "10",
+                "-w",
+                "%{http_code}",
+            ])
             .arg("https://www.gstatic.com/generate_204")
             .output();
         if let Ok(out) = out
@@ -422,7 +470,7 @@ mod tests {
 
     #[test]
     fn обвязка_роутера_переживает_обновление() {
-        let (text, count, _) = merge(РОУТЕР, &[нода("Новая-1", "c.example")], &[]).unwrap();
+        let (text, count) = merge(РОУТЕР, &[нода("Новая-1", "c.example")]).unwrap();
         assert_eq!(count, 1);
         let c = Json::parse(&text).unwrap();
         // Всё, что не ноды, осталось на месте — иначе роутер потеряет интернет.
@@ -430,27 +478,39 @@ mod tests {
         assert!(c.get("inbounds").is_some(), "входы потерялись");
         assert!(c.get("experimental").is_some(), "clash API потерялся");
         assert_eq!(
-            c.get("log").and_then(|l| l.get("level")).and_then(|v| v.as_str()),
+            c.get("log")
+                .and_then(|l| l.get("level"))
+                .and_then(|v| v.as_str()),
             Some("warn".to_string())
         );
     }
 
     #[test]
     fn старые_ноды_уходят_новые_приходят() {
-        let (text, _, _) = merge(РОУТЕР, &[нода("Новая-1", "c.example"), нода("Новая-2", "d.example")], &[]).unwrap();
+        let (text, _) = merge(
+            РОУТЕР,
+            &[нода("Новая-1", "c.example"), нода("Новая-2", "d.example")],
+        )
+        .unwrap();
         let c = Json::parse(&text).unwrap();
         let tags: Vec<String> = c
             .get("outbounds")
             .map(|o| o.arr().iter().filter_map(tag_of).collect())
             .unwrap_or_default();
         assert!(tags.contains(&"Новая-1".to_string()));
-        assert!(!tags.iter().any(|t| t.starts_with("Старая")), "старые ноды остались: {tags:?}");
-        assert!(tags.contains(&"direct".to_string()), "direct не должен пропадать");
+        assert!(
+            !tags.iter().any(|t| t.starts_with("Старая")),
+            "старые ноды остались: {tags:?}"
+        );
+        assert!(
+            tags.contains(&"direct".to_string()),
+            "direct не должен пропадать"
+        );
     }
 
     #[test]
     fn списки_выбора_показывают_новые_ноды_и_хранят_прочее() {
-        let (text, _, _) = merge(РОУТЕР, &[нода("Новая-1", "c.example")], &[]).unwrap();
+        let (text, _) = merge(РОУТЕР, &[нода("Новая-1", "c.example")]).unwrap();
         let c = Json::parse(&text).unwrap();
         let selector = c
             .get("outbounds")
@@ -465,7 +525,10 @@ mod tests {
             .map(|o| o.arr().iter().filter_map(|e| e.as_str()).collect())
             .unwrap_or_default();
         assert!(list.contains(&"Новая-1".to_string()));
-        assert!(list.contains(&"auto".to_string()), "вложенный auto потерялся");
+        assert!(
+            list.contains(&"auto".to_string()),
+            "вложенный auto потерялся"
+        );
         assert!(!list.iter().any(|t| t.starts_with("Старая")));
     }
 
@@ -473,7 +536,7 @@ mod tests {
     fn умолчание_не_остаётся_на_исчезнувшей_ноде() {
         // Тут умолчание указывает прямо на ноду, а не на auto.
         let config = РОУТЕР.replace("\"default\": \"auto\"", "\"default\": \"Старая-1\"");
-        let (text, _, _) = merge(&config, &[нода("Новая-1", "c.example")], &[]).unwrap();
+        let (text, _) = merge(&config, &[нода("Новая-1", "c.example")]).unwrap();
         let c = Json::parse(&text).unwrap();
         let selector = c
             .get("outbounds")
@@ -489,22 +552,29 @@ mod tests {
         );
     }
 
-
     #[test]
-    fn прежняя_нода_остаётся_рядом_со_свежими() {
-        let keep = vec!["Старая-2".to_string()];
-        let (text, count, kept_count) = merge(РОУТЕР, &[нода("Новая-1", "c.example")], &keep).unwrap();
-        assert_eq!(count, 2, "считаем и свежие, и перенесённые");
-        assert_eq!(kept_count, 1, "перенесённой числится ровно одна");
+    fn merge_кладёт_ровно_переданный_список() {
+        // Что оставить живым, а что убрать, решает sub::reconcile до merge;
+        // merge лишь подставляет готовый список. Передали свежую и одну
+        // прежнюю — обе в конфиге и в списке выбора, остальные прежние ушли.
+        let (text, count) = merge(
+            РОУТЕР,
+            &[нода("Новая-1", "c.example"), нода("Старая-2", "b.example")],
+        )
+        .unwrap();
+        assert_eq!(count, 2);
         let c = Json::parse(&text).unwrap();
         let tags: Vec<String> = c
             .get("outbounds")
             .map(|o| o.arr().iter().filter_map(tag_of).collect())
             .unwrap_or_default();
         assert!(tags.contains(&"Новая-1".to_string()));
-        assert!(tags.contains(&"Старая-2".to_string()), "живую не перенесли: {tags:?}");
-        assert!(!tags.contains(&"Старая-1".to_string()), "мёртвую тащить не надо");
-        // И в списке выбора она тоже должна быть, иначе толку от неё нет.
+        assert!(tags.contains(&"Старая-2".to_string()));
+        assert!(
+            !tags.contains(&"Старая-1".to_string()),
+            "лишнюю не переносим: {tags:?}"
+        );
+
         let selector = c
             .get("outbounds")
             .unwrap()
@@ -517,48 +587,27 @@ mod tests {
             .get("outbounds")
             .map(|o| o.arr().iter().filter_map(|e| e.as_str()).collect())
             .unwrap_or_default();
+        assert!(list.contains(&"Новая-1".to_string()));
         assert!(list.contains(&"Старая-2".to_string()));
-    }
-
-
-    #[test]
-    fn отпавшие_ноды_не_выбрасываются() {
-        // Живость не проверяем намеренно: молчащая нода назавтра оживает, а
-        // urltest мёртвую всё равно не выберет.
-        let keep = vec!["Старая-1".to_string(), "Старая-2".to_string()];
-        let (text, count, kept_count) =
-            merge(РОУТЕР, &[нода("Новая-1", "c.example")], &keep).unwrap();
-        assert_eq!(count, 3);
-        assert_eq!(kept_count, 2);
-        let c = Json::parse(&text).unwrap();
-        let tags: Vec<String> = c
-            .get("outbounds")
-            .map(|o| o.arr().iter().filter_map(tag_of).collect())
-            .unwrap_or_default();
-        for t in ["Новая-1", "Старая-1", "Старая-2"] {
-            assert!(tags.contains(&t.to_string()), "потеряли {t}: {tags:?}");
-        }
+        assert!(
+            list.contains(&"auto".to_string()),
+            "вложенный auto потерялся"
+        );
     }
 
     #[test]
-    fn та_же_нода_под_новым_именем_не_двоится() {
-        // Подписка вернула ту же машину, но назвала иначе. Старую переносить
-        // не надо — иначе в списке две записи на один сервер.
-        let keep = vec!["Старая-1".to_string()];
-        let (text, count, kept_count) = merge(РОУТЕР, &[нода("Новое имя", "a.example")], &keep).unwrap();
-        assert_eq!(count, 1);
-        assert_eq!(kept_count, 0, "дубль по адресу переносить не надо");
-        let c = Json::parse(&text).unwrap();
-        let tags: Vec<String> = c
-            .get("outbounds")
-            .map(|o| o.arr().iter().filter_map(tag_of).collect())
-            .unwrap_or_default();
-        assert!(tags.contains(&"Новое имя".to_string()));
-        assert!(!tags.contains(&"Старая-1".to_string()), "дубль по адресу: {tags:?}");
+    fn пустой_список_ничего_не_ломает() {
+        assert!(merge(РОУТЕР, &[]).is_err());
     }
 
     #[test]
-    fn пустая_подписка_ничего_не_ломает() {
-        assert!(merge(РОУТЕР, &[], &[]).is_err());
+    fn same_nodes_не_зависит_от_порядка_но_ловит_смену_ключа() {
+        let a = нода("N1", "a.example");
+        let b = нода("N2", "b.example");
+        assert!(same_nodes(&[a.clone(), b.clone()], &[b.clone(), a.clone()]));
+
+        let mut b2 = b.clone();
+        b2.secret = "99999999-9999-9999-9999-999999999999".into();
+        assert!(!same_nodes(&[a.clone(), b], &[a, b2]));
     }
 }

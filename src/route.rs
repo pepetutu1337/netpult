@@ -22,9 +22,18 @@ pub struct Exit {
 
 /// Похоже ли имя на интерфейс туннеля.
 fn is_tunnel(name: &str) -> bool {
-    ["tun", "utun", "wg", "tailscale", "ppp", "proton", "nordlynx", "amnezia"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    [
+        "tun",
+        "utun",
+        "wg",
+        "tailscale",
+        "ppp",
+        "proton",
+        "nordlynx",
+        "amnezia",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
 }
 
 pub fn default_exit() -> Option<Exit> {
@@ -32,7 +41,12 @@ pub fn default_exit() -> Option<Exit> {
     // пакет, а не пересказ таблицы: при поднятом туннеле разница
     // принципиальна.
     let (program, args, dev_key, gw_key) = if cfg!(target_os = "macos") {
-        ("route", vec!["-n", "get", "1.1.1.1"], "interface:", "gateway:")
+        (
+            "route",
+            vec!["-n", "get", "1.1.1.1"],
+            "interface:",
+            "gateway:",
+        )
     } else if cfg!(target_os = "linux") {
         ("ip", vec!["route", "get", "1.1.1.1"], "dev", "via")
     } else {
@@ -97,11 +111,18 @@ fn foreign_tunnels(cfg: &Config) -> Vec<String> {
 }
 
 fn system_proxy() -> Option<String> {
-    for key in ["all_proxy", "https_proxy", "http_proxy", "ALL_PROXY", "HTTPS_PROXY"] {
+    for key in [
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+    ] {
         if let Ok(value) = std::env::var(key)
-            && !value.trim().is_empty() {
-                return Some(format!("{key}={value}"));
-            }
+            && !value.trim().is_empty()
+        {
+            return Some(format!("{key}={value}"));
+        }
     }
     None
 }
@@ -118,9 +139,10 @@ fn nameservers() -> Vec<String> {
     // 127.0.0.53 — это заглушка systemd-resolved, а не настоящий сервер: за
     // ней стоит либо роутер, либо DoH, и разница тут как раз важна.
     if listed.iter().all(|ip| ip.starts_with("127."))
-        && let Some(real) = resolved_upstream() {
-            return real;
-        }
+        && let Some(real) = resolved_upstream()
+    {
+        return real;
+    }
     listed
 }
 
@@ -238,23 +260,29 @@ pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
     }
 
     println!("\n{BOLD}  На этом компьютере{RESET}");
-    mark(zapret_on, &format!(
-        "zapret        {}",
-        if zapret_on {
-            z.strategy().unwrap_or_else(|| "включён".into())
-        } else {
-            "выключен".into()
-        }
-    ));
-    mark(tunnel_on, &format!(
-        "свой туннель  {}",
-        match (tunnel_on, singbox::active_node()) {
-            (true, Some((name, auto))) =>
-                format!("{name}{}", if auto { " (автоподбор)" } else { "" }),
-            (true, None) => "поднят".to_string(),
-            _ => "выключен".to_string(),
-        }
-    ));
+    mark(
+        zapret_on,
+        &format!(
+            "zapret        {}",
+            if zapret_on {
+                z.strategy().unwrap_or_else(|| "включён".into())
+            } else {
+                "выключен".into()
+            }
+        ),
+    );
+    mark(
+        tunnel_on,
+        &format!(
+            "свой туннель  {}",
+            match (tunnel_on, singbox::active_node()) {
+                (true, Some((name, auto))) =>
+                    format!("{name}{}", if auto { " (автоподбор)" } else { "" }),
+                (true, None) => "поднят".to_string(),
+                _ => "выключен".to_string(),
+            }
+        ),
+    );
     if foreign.is_empty() {
         mark(false, "чужой VPN     не вижу");
     } else {
@@ -273,21 +301,33 @@ pub fn report(cfg: &Config, deep: bool) -> Result<(), String> {
             // оказалась в прошлый раз. Без этого отчёт дома и в чужой сети
             // выглядит одинаково, а значит не отвечает на главный вопрос.
             вспомнить(сеть.as_deref());
-            println!("  {DIM}проверить сейчас: net path --deep (ненадолго выключит свой обход){RESET}");
+            println!(
+                "  {DIM}проверить сейчас: net path --deep (ненадолго выключит свой обход){RESET}"
+            );
         }
     } else {
         let upstream = probe_blocked();
         crate::network::remember(сеть.as_deref(), upstream);
         if upstream {
-            println!("  {GREEN}● обход стоит выше — заблокированное открывается без всякого пульта{RESET}");
-            println!("  {DIM}обычно это роутер или сам провайдер. Свой zapret тут не нужен.{RESET}");
+            println!(
+                "  {GREEN}● обход стоит выше — заблокированное открывается без всякого пульта{RESET}"
+            );
+            println!(
+                "  {DIM}обычно это роутер или сам провайдер. Свой zapret тут не нужен.{RESET}"
+            );
         } else {
             println!("  {RED}○ обхода выше нет — заблокированное не открывается{RESET}");
             println!("  {DIM}включить свой: net on{RESET}");
         }
     }
 
-    let troubles = conflicts(zapret_on, tunnel_on, &foreign, proxy.is_some(), exit.as_ref());
+    let troubles = conflicts(
+        zapret_on,
+        tunnel_on,
+        &foreign,
+        proxy.is_some(),
+        exit.as_ref(),
+    );
     if !troubles.is_empty() {
         println!("\n{BOLD}  Мешает друг другу{RESET}");
         for line in troubles {
@@ -391,7 +431,10 @@ fn conflicts(
         ));
     }
     if foreign.len() > 1 {
-        out.push(format!("сразу несколько чужих туннелей: {}", foreign.join(", ")));
+        out.push(format!(
+            "сразу несколько чужих туннелей: {}",
+            foreign.join(", ")
+        ));
     }
     if proxy && tunnel_on {
         out.push(
@@ -400,12 +443,14 @@ fn conflicts(
         );
     }
     if let Some(exit) = exit
-        && tunnel_on && !is_tunnel(&exit.interface) {
-            out.push(format!(
-                "туннель поднят, но трафик уходит через {} — маршрут он на себя не забрал",
-                exit.interface
-            ));
-        }
+        && tunnel_on
+        && !is_tunnel(&exit.interface)
+    {
+        out.push(format!(
+            "туннель поднят, но трафик уходит через {} — маршрут он на себя не забрал",
+            exit.interface
+        ));
+    }
     out
 }
 
