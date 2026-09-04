@@ -6,6 +6,7 @@ mod deps;
 mod dns;
 mod doctor;
 mod json;
+mod manifest;
 mod network;
 mod picker;
 mod probe;
@@ -13,12 +14,14 @@ mod profile;
 mod progress;
 mod qr;
 mod route;
+mod seal;
 mod share;
 mod singbox;
 mod socks;
 mod split;
 mod sub;
 mod subs;
+mod subsbot;
 mod sudoer;
 mod sync;
 mod telegram;
@@ -285,80 +288,8 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
         // Обновление нод в чужом конфиге sing-box: на роутере ядро подняли
         // отдельно от пульта, и трогать там можно только список нод.
         Some("sync") => {
-            let mut plan = sync::Plan::default();
-            let mut args = rest[1..].iter().copied();
-            while let Some(arg) = args.next() {
-                match arg {
-                    "--config" => match args.next() {
-                        Some(path) => plan.config = path.into(),
-                        None => return Err("--config ждёт путь к конфигу".into()),
-                    },
-                    "--binary" => match args.next() {
-                        Some(path) => plan.binary = path.into(),
-                        None => return Err("--binary ждёт путь к sing-box".into()),
-                    },
-                    "--proxy" => match args.next() {
-                        Some(addr) => plan.probe_proxy = addr.to_string(),
-                        None => {
-                            return Err("--proxy ждёт адрес вида socks5h://127.0.0.1:1180".into());
-                        }
-                    },
-                    "--restart" => {
-                        let tail: Vec<String> = args.by_ref().map(str::to_string).collect();
-                        if tail.is_empty() {
-                            return Err("--restart ждёт команду перезапуска ядра".into());
-                        }
-                        plan.restart = tail;
-                    }
-                    "--dry-run" => plan.dry_run = true,
-                    "--fresh-only" => plan.keep_alive = false,
-                    other => return Err(format!("непонятный ключ: {other}")),
-                }
-            }
-            // Шесть отрезков: подписка, сборка, проверка, бэкап с заменой,
-            // перезапуск, проба наружу. Седьмой (откат) считается запасным.
-            let mut ход = progress::Progress::new("обновляю", 6).logged();
-            let report = {
-                let ход = &mut ход;
-                sync::run(&plan, &mut |что| {
-                    ход.step(что);
-                    ход.tick();
-                })
-            };
-            ход.clear();
-            let report = report?;
-            if report.rolled_back {
-                println!("{YELLOW}{}{RESET}", report.note);
-                println!(
-                    "{DIM}прежний конфиг лежит в {}{RESET}",
-                    report.backup.display()
-                );
-                return Err("обновление откачено".into());
-            }
-            let mut хвост = Vec::new();
-            if report.carried > 0 {
-                хвост.push(format!("перенесено живыми: {}", report.carried));
-            }
-            if report.revived > 0 {
-                хвост.push(format!("из запаса: {}", report.revived));
-            }
-            if report.parked > 0 {
-                хвост.push(format!("в запас: {}", report.parked));
-            }
-            let хвост = if хвост.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", хвост.join(", "))
-            };
-            println!("{GREEN}{}: {}{хвост}{RESET}", report.note, report.nodes);
-            let what = if plan.dry_run {
-                "собранный конфиг"
-            } else {
-                "прежний конфиг"
-            };
-            println!("{DIM}{what}: {}{RESET}", report.backup.display());
-            println!("{DIM}журнал: net vpn log sub{RESET}");
-            Ok(())
+            let plan = parse_sync_plan(&rest[1..])?;
+            run_sync(&plan)
         }
         Some("sub") | Some("subscription") => {
             let url = rest
@@ -776,6 +707,88 @@ fn vpn_refresh(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Разобрать ключи `--config/--binary/--proxy/--restart/--dry-run/--fresh-only`
+/// в план обновления чужого конфига. Общий для `net vpn sync` и `subs poll`.
+fn parse_sync_plan(argv: &[&str]) -> Result<sync::Plan, String> {
+    let mut plan = sync::Plan::default();
+    let mut args = argv.iter().copied();
+    while let Some(arg) = args.next() {
+        match arg {
+            "--config" => match args.next() {
+                Some(path) => plan.config = path.into(),
+                None => return Err("--config ждёт путь к конфигу".into()),
+            },
+            "--binary" => match args.next() {
+                Some(path) => plan.binary = path.into(),
+                None => return Err("--binary ждёт путь к sing-box".into()),
+            },
+            "--proxy" => match args.next() {
+                Some(addr) => plan.probe_proxy = addr.to_string(),
+                None => return Err("--proxy ждёт адрес вида socks5h://127.0.0.1:1180".into()),
+            },
+            "--restart" => {
+                let tail: Vec<String> = args.by_ref().map(str::to_string).collect();
+                if tail.is_empty() {
+                    return Err("--restart ждёт команду перезапуска ядра".into());
+                }
+                plan.restart = tail;
+            }
+            "--dry-run" => plan.dry_run = true,
+            "--fresh-only" => plan.keep_alive = false,
+            other => return Err(format!("непонятный ключ: {other}")),
+        }
+    }
+    Ok(plan)
+}
+
+/// Прогнать обновление чужого конфига с индикатором и разбором отчёта.
+fn run_sync(plan: &sync::Plan) -> Result<(), String> {
+    // Шесть отрезков: подписки, сборка, проверка, бэкап с заменой, перезапуск,
+    // проба наружу. Седьмой (откат) считается запасным.
+    let mut ход = progress::Progress::new("обновляю", 6).logged();
+    let report = {
+        let ход = &mut ход;
+        sync::run(plan, &mut |что| {
+            ход.step(что);
+            ход.tick();
+        })
+    };
+    ход.clear();
+    let report = report?;
+    if report.rolled_back {
+        println!("{YELLOW}{}{RESET}", report.note);
+        println!(
+            "{DIM}прежний конфиг лежит в {}{RESET}",
+            report.backup.display()
+        );
+        return Err("обновление откачено".into());
+    }
+    let mut хвост = Vec::new();
+    if report.carried > 0 {
+        хвост.push(format!("перенесено живыми: {}", report.carried));
+    }
+    if report.revived > 0 {
+        хвост.push(format!("из запаса: {}", report.revived));
+    }
+    if report.parked > 0 {
+        хвост.push(format!("в запас: {}", report.parked));
+    }
+    let хвост = if хвост.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", хвост.join(", "))
+    };
+    println!("{GREEN}{}: {}{хвост}{RESET}", report.note, report.nodes);
+    let what = if plan.dry_run {
+        "собранный конфиг"
+    } else {
+        "прежний конфиг"
+    };
+    println!("{DIM}{what}: {}{RESET}", report.backup.display());
+    println!("{DIM}журнал: net vpn log sub{RESET}");
+    Ok(())
+}
+
 /// `net vpn subs …` — список ссылок и работа с ним.
 fn vpn_subs(cfg: &Config, args: &[&str]) -> Result<(), String> {
     match args.first().copied() {
@@ -787,6 +800,8 @@ fn vpn_subs(cfg: &Config, args: &[&str]) -> Result<(), String> {
                 .ok_or("нужна ссылка: net vpn subs add <url>")?;
             vpn_subscribe(cfg, url)
         }
+        Some("seal") => vpn_subs_seal(&args[1..]),
+        Some("poll") => vpn_subs_poll(cfg, &args[1..]),
         Some("rm") | Some("del") | Some("forget") => {
             let url = args
                 .get(1)
@@ -849,6 +864,162 @@ fn vpn_subs_list() -> Result<(), String> {
     println!("\n{DIM}● активна · ○ в отставке (не опрашивается){RESET}");
     println!("{DIM}Вернуть: net vpn subs revive <url> · забыть: net vpn subs rm <url>{RESET}");
     Ok(())
+}
+
+/// `net vpn subs seal [--key K] <файл>` — запечатать список ссылок в блоб для
+/// манифеста. Файл: по ссылке на строку; строка с `-` в начале — удалить.
+/// `seq` берётся из времени, поэтому всегда новее прежнего.
+fn vpn_subs_seal(args: &[&str]) -> Result<(), String> {
+    let mut key = None;
+    let mut file = None;
+    let mut it = args.iter().copied();
+    while let Some(a) = it.next() {
+        match a {
+            "--key" => key = it.next(),
+            other => file = Some(other),
+        }
+    }
+    let file = file.ok_or("нужен файл: net vpn subs seal [--key K] <файл>")?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("не прочитать {file}: {e}"))?;
+
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        if let Some(url) = line.strip_prefix('-') {
+            remove.push(url.trim().to_string());
+        } else {
+            add.push(line.trim_start_matches('+').trim().to_string());
+        }
+    }
+    if add.is_empty() && remove.is_empty() {
+        return Err("в файле нет ни одной ссылки".into());
+    }
+
+    let secret = manifest::secret(key)?;
+    let blob = manifest::pack(&secret, sub::now_secs(), &add, &remove);
+    println!("{blob}");
+    eprintln!(
+        "{DIM}запечатано: +{} / -{}. Вставь этот блоб в манифест (гист/pastebin).{RESET}",
+        add.len(),
+        remove.len()
+    );
+    Ok(())
+}
+
+/// `net vpn subs poll [--manifest URL] [--key K] [--then-sync <ключи sync>]`
+/// — один цикл забора новых ссылок из бота и манифеста. Если список подписок
+/// изменился: с `--then-sync` обновляет чужой конфиг на месте, иначе —
+/// пересобирает свой (`vpn refresh`). Тихо переживает недоступность Telegram
+/// и отсутствие манифеста — на то и два канала.
+fn vpn_subs_poll(cfg: &Config, args: &[&str]) -> Result<(), String> {
+    let mut manifest_url = None;
+    let mut key = None;
+    let mut sync_args: Vec<&str> = Vec::new();
+    let mut it = args.iter().copied();
+    while let Some(a) = it.next() {
+        match a {
+            "--manifest" => manifest_url = it.next(),
+            "--key" => key = it.next(),
+            "--then-sync" => {
+                sync_args = it.by_ref().collect();
+                break;
+            }
+            other => return Err(format!("непонятный ключ: {other}")),
+        }
+    }
+    // Ссылку манифеста и ключ можно не передавать — возьмём из конфига.
+    let manifest_url = manifest_url
+        .map(str::to_string)
+        .or_else(|| config_value("sub_manifest_url"));
+
+    let mut changed = false;
+    let mut итог: Vec<String> = Vec::new();
+    let bot = subsbot::creds();
+
+    // 1. Бот.
+    if let Some((ref token, chat)) = bot {
+        match subsbot::poll_once(token, chat) {
+            Ok(p) => {
+                if p.handled > 0 {
+                    итог.push(format!("бот: команд {}", p.handled));
+                }
+                changed |= p.store_changed;
+            }
+            Err(e) => eprintln!("{DIM}бот недоступен: {e}{RESET}"),
+        }
+    }
+
+    // 2. Манифест.
+    if let Some(url) = &manifest_url {
+        match manifest::secret(key).and_then(|s| manifest::poll(url, &s)) {
+            Ok(a) if a.stale => {}
+            Ok(a) => {
+                if !a.added.is_empty() {
+                    итог.push(format!("манифест +{}", a.added.len()));
+                }
+                if !a.removed.is_empty() {
+                    итог.push(format!("манифест -{}", a.removed.len()));
+                }
+                changed |= a.changed();
+            }
+            Err(e) => eprintln!("{DIM}манифест: {e}{RESET}"),
+        }
+    }
+
+    if !changed {
+        if !итог.is_empty() {
+            println!("{}", итог.join(", "));
+        } else {
+            println!("{DIM}новых ссылок нет{RESET}");
+        }
+        return Ok(());
+    }
+
+    // Список изменился — применяем. Ссылки уже записаны в store; если сборка
+    // конфига не удалась (например, ни одна нода пока не отвечает), это не
+    // повод валить весь опрос — сообщаем и выходим успешно, следующий
+    // регулярный refresh доберёт.
+    println!(
+        "{GREEN}список подписок изменился ({}){RESET}",
+        итог.join(", ")
+    );
+    let применение = if sync_args.is_empty() {
+        vpn_refresh(cfg).map(|_| "конфиг пересобран".to_string())
+    } else {
+        parse_sync_plan(&sync_args)
+            .and_then(|plan| run_sync(&plan).map(|_| "чужой конфиг обновлён".to_string()))
+    };
+    let сводка = match применение {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{YELLOW}ссылки записаны, но собрать конфиг не вышло: {e}{RESET}");
+            format!("ссылки записаны, конфиг пока не собрался: {e}")
+        }
+    };
+
+    // Отчитаться в чат — хозяин увидит, что ссылка доехала.
+    if let Some((token, chat)) = bot {
+        subsbot::notify(&token, chat, &format!("{}. {}", итог.join(", "), сводка));
+    }
+    Ok(())
+}
+
+/// Значение ключа из конфига netpult (`state_dir/config`), если задано.
+fn config_value(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(config::config_path()).ok()?;
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+            && !v.trim().is_empty()
+        {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Перезапустить туннель, если он поднят, чтобы обновлённые ноды заработали.
