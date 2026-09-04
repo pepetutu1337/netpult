@@ -275,9 +275,7 @@ pub fn tick(cfg: &Config) -> bool {
     if z.state() == State::Missing {
         return acted;
     }
-    if cfg.watch_zapret && z.state() == State::Off && z.is_manual_off() {
-        // Выключили руками — не чиним, ждём следующей ручной команды.
-    } else if cfg.watch_zapret && z.state() == State::Off {
+    if revive_zapret(cfg.watch_zapret, z.state(), z.is_manual_off()) {
         match z.start() {
             Ok(()) => {
                 note("zapret был выключен — включил");
@@ -456,6 +454,13 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     }
 }
 
+/// Поднимать ли выключенный zapret. Сторож лечит только то, что сломалось
+/// само: выключенный явной командой обход не трогаем, иначе «net zapret off»
+/// живёт до ближайшего прохода сторожа и отменяется за спиной у хозяина.
+fn revive_zapret(watching: bool, state: State, manual_off: bool) -> bool {
+    watching && state == State::Off && !manual_off
+}
+
 /// Ставит сторожа в автозапуск.
 pub fn install(cfg: &Config) -> Result<String, String> {
     if !cfg!(target_os = "linux") {
@@ -488,7 +493,37 @@ pub fn install(cfg: &Config) -> Result<String, String> {
     let _ = cfg;
     run_systemctl(&["--user", "daemon-reload"])?;
     run_systemctl(&["--user", "enable", "--now", "netpult-watch.service"])?;
+    ensure_linger();
     Ok(unit.display().to_string())
+}
+
+/// Пользовательские службы systemd живут только пока у хозяина есть сеанс.
+/// Без задержки (linger) сторож после перезагрузки поднимется не при загрузке,
+/// а при первом входе — а на Деке в игровом режиме входа может не случиться
+/// вовсе. Ставится один раз и молча: не вышло — сторож всё равно работает,
+/// просто до следующего входа.
+fn ensure_linger() {
+    let user = std::env::var("USER").unwrap_or_default();
+    if user.is_empty() || linger_on(&user) {
+        return;
+    }
+    let _ = std::process::Command::new("loginctl")
+        .args(["enable-linger", &user])
+        .status();
+    if !linger_on(&user) {
+        let _ = crate::sudoer::ready();
+        let _ = crate::sudoer::command()
+            .args(["loginctl", "enable-linger", &user])
+            .status();
+    }
+}
+
+fn linger_on(user: &str) -> bool {
+    std::process::Command::new("loginctl")
+        .args(["show-user", user, "-p", "Linger"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Linger=yes"))
+        .unwrap_or(false)
 }
 
 pub fn uninstall() -> Result<(), String> {
@@ -509,7 +544,14 @@ pub fn status() -> String {
         .args(["--user", "is-active", "netpult-watch.service"])
         .output();
     match out {
-        Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "active" => "сторож: работает".into(),
+        Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "active" => {
+            let user = std::env::var("USER").unwrap_or_default();
+            if user.is_empty() || linger_on(&user) {
+                "сторож: работает".into()
+            } else {
+                "сторож: работает, но перезагрузку не переживёт — «loginctl enable-linger»".into()
+            }
+        }
         _ => "сторож: не запущен".into(),
     }
 }
@@ -523,5 +565,31 @@ fn run_systemctl(args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("systemctl {} завершился с ошибкой", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn упавший_сам_zapret_поднимается() {
+        assert!(revive_zapret(true, State::Off, false));
+    }
+
+    #[test]
+    fn выключенный_руками_zapret_сторож_не_трогает() {
+        assert!(!revive_zapret(true, State::Off, true));
+    }
+
+    #[test]
+    fn работающий_zapret_не_перезапускается() {
+        assert!(!revive_zapret(true, State::On, false));
+        assert!(!revive_zapret(true, State::On, true));
+    }
+
+    #[test]
+    fn без_присмотра_за_zapret_сторож_молчит() {
+        assert!(!revive_zapret(false, State::Off, false));
     }
 }

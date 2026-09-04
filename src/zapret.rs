@@ -126,8 +126,13 @@ impl<'a> Zapret<'a> {
         Ok(())
     }
 
+    /// Перезапуск тоже снимает метку ручного выключения: обход после него
+    /// работает, и оставленная метка означала бы, что упавший позже движок
+    /// сторож поднимать не станет.
     pub fn restart(&self) -> Result<(), String> {
-        self.service("restart")
+        self.service("restart")?;
+        clear_manual_off();
+        Ok(())
     }
 
     /// Выключали ли zapret явной командой (`net zapret off`/`toggle`), а не
