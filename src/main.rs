@@ -19,6 +19,7 @@ mod share;
 mod singbox;
 mod socks;
 mod sub;
+mod subs;
 mod sync;
 mod telegram;
 mod tune;
@@ -344,10 +345,8 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
                 .ok_or("нужна ссылка: net vpn sub <ссылка на подписку>")?;
             vpn_subscribe(cfg, url)
         }
-        Some("update") => {
-            let url = sub::saved_url()?;
-            vpn_subscribe(cfg, &url)
-        }
+        Some("update") => vpn_refresh(cfg),
+        Some("subs") => vpn_subs(cfg, &rest[1..]),
         Some("core") => match rest.get(1).copied() {
             Some("install") | None => {
                 println!("Качаю ядро...");
@@ -391,7 +390,10 @@ fn vpn_command(cfg: &Config, rest: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some("log") => {
-            let path = config::state_dir().join("core.log");
+            let path = match rest.get(1).copied() {
+                Some("sub") | Some("subs") => sub::refresh_log_path(),
+                _ => config::state_dir().join("core.log"),
+            };
             let text = std::fs::read_to_string(&path)
                 .map_err(|_| format!("журнала ещё нет: {}", path.display()))?;
             for line in text.lines().rev().take(30).collect::<Vec<_>>().iter().rev() {
@@ -678,77 +680,142 @@ fn vpn_bank_rm(what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `net vpn sub <url>` — завести ссылку и сразу обновиться, не дожидаясь крона.
 fn vpn_subscribe(cfg: &Config, url: &str) -> Result<(), String> {
-    println!("Забираю подписку...");
-    let mut nodes = sub::fetch(url, Duration::from_secs(30))?;
-
-    // Провайдер время от времени выводит рабочие ноды из подписки. Такую
-    // оставляем себе — но только если она ещё отвечает: мёртвую тащить в
-    // конфиг незачем, а в запасе она полежит и, если оживёт, вернётся сама
-    // на следующем обновлении.
-    let mut bank = sub::load_bank();
-    let dropped: Vec<sub::Kept> = bank
-        .iter()
-        .filter(|kept| {
-            !nodes
-                .iter()
-                .any(|fresh| sub::place(fresh) == sub::place(&kept.node))
-        })
-        .cloned()
-        .collect();
-    let mut revived = 0;
-    if !dropped.is_empty() {
-        println!("Проверяю {} нод, которых больше нет в подписке…", dropped.len());
-        let mut ход = progress::Progress::new("проверяю", dropped.len());
-        for kept in &dropped {
-            ход.step(&kept.node.name);
-            if sub::responds(&kept.node, Duration::from_secs(3)) {
-                ход.line(&format!("  {GREEN}живая{RESET} {}", kept.node.name));
-                nodes.push(kept.node.clone());
-                revived += 1;
-            }
-            ход.tick();
+    let mut store = subs::Store::load();
+    let свежая = store.add(url);
+    store.save()?;
+    println!(
+        "{}",
+        if свежая {
+            format!("{GREEN}Ссылка добавлена{RESET}")
+        } else {
+            format!("{DIM}Ссылка уже в списке{RESET}")
         }
-        ход.finish();
-    }
+    );
+    vpn_refresh(cfg)
+}
 
-    sub::dedupe_names(&mut nodes);
-    let config = singbox::build_config(&nodes)?;
-    let path = sub::save(url, &nodes, &config)?;
+/// Перечитать все активные подписки и пересобрать конфиг движка.
+fn vpn_refresh(cfg: &Config) -> Result<(), String> {
+    println!("Забираю подписки...");
+    let r = subs::refresh(Duration::from_secs(3))?;
+    let rec = &r.rec;
 
-    // В запас кладём всё, что видели: и свежее, и прежнее. Молчащая сегодня
-    // нода завтра оживает, и терять её адрес не нужно. Заодно отмечаем время
-    // отклика — по нему потом видно, когда нода подавала признаки жизни.
-    let живые: Vec<String> = nodes.iter().map(sub::place).collect();
-    let сейчас = sub::now_secs();
-    sub::add_missing(&mut bank, &nodes);
-    for kept in bank.iter_mut() {
-        if живые.contains(&sub::place(&kept.node)) {
-            kept.last_ok = Some(сейчас);
+    for f in &r.fetched {
+        match &f.result {
+            Ok(n) => println!("  {GREEN}✓{RESET} {}  {DIM}{n} нод{RESET}", subs::short(&f.url)),
+            Err(e) => println!("  {YELLOW}✗{RESET} {}  {DIM}{e}{RESET}", subs::short(&f.url)),
+        }
+        if f.retired {
+            println!(
+                "    {YELLOW}→ в отставку: {} провалов подряд{RESET}",
+                subs::RETIRE_AFTER
+            );
         }
     }
-    sub::save_bank(&bank)?;
 
     println!(
-        "{GREEN}Разобрано нод: {}{RESET}\nКонфиг: {}",
-        nodes.len(),
-        path.display()
+        "{GREEN}Актив: {}{RESET}  {DIM}+{} новых · ~{} перенесено · ↺{} из запаса · ⚰{} в запас · ✂{} вычищено{RESET}",
+        rec.active.len(),
+        rec.added.len(),
+        rec.carried.len(),
+        rec.revived.len(),
+        rec.parked.len(),
+        rec.pruned.len(),
     );
-    if revived > 0 {
-        println!(
-            "{DIM}из них оставлено своих, выведенных из подписки: {revived}{RESET}"
-        );
+    if !rec.revived.is_empty() {
+        println!("{DIM}вернулись из запаса: {}{RESET}", rec.revived.join(", "));
     }
-    let asleep = bank.len().saturating_sub(nodes.len());
-    if asleep > 0 {
-        println!("{DIM}в запасе лежит молчащих: {asleep} (вернутся, когда оживут){RESET}");
+    if !rec.parked.is_empty() {
+        println!("{DIM}ушли в запас: {}{RESET}", rec.parked.join(", "));
     }
-    println!("Список нод — net vpn nodes");
+    println!(
+        "{DIM}Конфиг: {}  ·  журнал: net vpn log sub{RESET}",
+        r.config.display()
+    );
 
     // Ядро держит конфиг в памяти с момента запуска. Без перезапуска новые
     // ноды лежат на диске, а туннель продолжает ходить через старые — и
     // команда выглядит выполненной, хотя ничего не изменилось.
     подхватить_ноды(cfg);
+    Ok(())
+}
+
+/// `net vpn subs …` — список ссылок и работа с ним.
+fn vpn_subs(cfg: &Config, args: &[&str]) -> Result<(), String> {
+    match args.first().copied() {
+        None | Some("list") => vpn_subs_list(),
+        Some("add") => {
+            let url = args
+                .get(1)
+                .copied()
+                .ok_or("нужна ссылка: net vpn subs add <url>")?;
+            vpn_subscribe(cfg, url)
+        }
+        Some("rm") | Some("del") | Some("forget") => {
+            let url = args
+                .get(1)
+                .copied()
+                .ok_or("нужна ссылка: net vpn subs rm <url>")?;
+            let mut store = subs::Store::load();
+            if store.forget(url) {
+                store.save()?;
+                println!("{GREEN}Ссылка убрана{RESET}");
+                Ok(())
+            } else {
+                Err("нет такой ссылки — смотри net vpn subs list".into())
+            }
+        }
+        Some("revive") => {
+            let url = args
+                .get(1)
+                .copied()
+                .ok_or("нужна ссылка: net vpn subs revive <url>")?;
+            let mut store = subs::Store::load();
+            if store.revive(url) {
+                store.save()?;
+                println!("{GREEN}Ссылка поднята из отставки{RESET}");
+                vpn_refresh(cfg)
+            } else {
+                Err("нет такой отставленной ссылки — смотри net vpn subs list".into())
+            }
+        }
+        Some(other) => Err(format!(
+            "net vpn subs [list|add|rm|revive], а не «{other}»"
+        )),
+    }
+}
+
+fn vpn_subs_list() -> Result<(), String> {
+    let store = subs::Store::load();
+    if store.subs.is_empty() {
+        println!("{DIM}Подписок нет — net vpn subs add <ссылка>{RESET}");
+        return Ok(());
+    }
+    println!("{BOLD}ПОДПИСКИ{RESET}\n");
+    for s in &store.subs {
+        let (метка, состояние) = match s.state {
+            subs::State::Active => (format!("{GREEN}●{RESET}"), String::new()),
+            subs::State::Retired => (
+                format!("{DIM}○{RESET}"),
+                format!("  {YELLOW}в отставке{RESET}"),
+            ),
+        };
+        let провалы = if s.fail_streak > 0 {
+            format!("  {DIM}провалов подряд: {}{RESET}", s.fail_streak)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {метка} {}  {DIM}нод в прошлый раз: {} · отдавала: {}{RESET}{провалы}{состояние}",
+            subs::short(&s.url),
+            s.last_count,
+            когда(s.last_live),
+        );
+    }
+    println!("\n{DIM}● активна · ○ в отставке (не опрашивается){RESET}");
+    println!("{DIM}Вернуть: net vpn subs revive <url> · забыть: net vpn subs rm <url>{RESET}");
     Ok(())
 }
 
